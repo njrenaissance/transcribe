@@ -9,9 +9,11 @@ for transcription.
 - [Terraform](https://developer.hashicorp.com/terraform/install) >= 1.7.0
 - An Azure subscription and credentials with rights to create resource
   groups and Cognitive Services accounts (e.g. via `az login`)
-- A remote state backend configured for your environment before running
-  `apply` for real — this configuration does not define one; add a
-  `backend` block (e.g. `azurerm` backend) suited to your setup
+
+State is local (the default `terraform.tfstate` file, not a remote
+backend) — see ADR-0002 for why. `terraform.tfstate*` is git-ignored;
+never commit it, and keep it safe on whichever machine runs `apply`,
+since it's the only record of what's been provisioned.
 
 ## Usage
 
