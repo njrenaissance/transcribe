@@ -1,6 +1,6 @@
 # spec.md
 
-**Status:** draft
+**Status:** approved
 
 ## Purpose
 Transcribe local audio files into timestamped text via a CLI, using Azure AI Speech's Batch Transcription API.
