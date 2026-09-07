@@ -8,7 +8,16 @@ Transcribe local audio files into timestamped text via a CLI, using Azure AI Spe
 ## Inputs / Outputs
 - Input: one or more local audio file paths as CLI arguments, e.g. `transcribe audio.mp3 interview.wav`.
 - Input (credentials): Azure Speech endpoint and key read from environment variables `AZURE_SPEECH_ENDPOINT` and `AZURE_SPEECH_KEY` (plain `os.environ` reads — this project has app config, i.e. `pydantic-settings`, disabled per `CLAUDE.md`).
-- Process: each file is submitted as a Batch Transcription job (Azure's asynchronous API — upload, then poll job status until it reaches a terminal state), not the synchronous/fast transcription endpoint. The CLI polls until the job is `Succeeded` or `Failed` before writing output or reporting an error.
+- Process: each file is submitted as a Batch Transcription job (Azure's asynchronous API), not the synchronous/fast transcription endpoint. Steps:
+  1. Submit the job (`POST .../transcriptions`), get back a job URL.
+  2. Poll the job URL until status is `Succeeded` or `Failed`.
+  3. On `Succeeded`, call Azure's Get Transcription Files endpoint
+     (`GET .../transcriptions/{id}/files`) to list result files.
+  4. Download the file of kind `Transcription` from its `contentUrl`
+     (a separate, often SAS-signed, storage URL — the job-status
+     response never contains the transcript itself).
+  5. Transform Azure's result JSON into this spec's output schema
+     (below) and write it to `FILE.json`.
 - Output: for each input `FILE`, a sibling JSON file `FILE.json`:
   ```json
   {
@@ -41,3 +50,4 @@ LLM (Azure AI Speech Batch Transcription API — hosted, asynchronous transcript
 8. `transcribe audio.mp3` where submitting the batch job to Azure fails (e.g. raises an authentication or network error) exits with code 1, prints an error to stderr describing the failure, and does not create `audio.mp3.json` — no partial or corrupt output file is ever written.
 9. `transcribe audio.mp3` where the batch job is accepted but reaches Azure's `Failed` terminal status (job-level failure, not a transport/auth error) exits with code 1, prints an error to stderr that includes Azure's reported failure reason, and does not create `audio.mp3.json`.
 10. `transcribe audio.mp3` where the batch job stays in a non-terminal status (e.g. `Running`) past a configured timeout exits with code 1, prints a timeout error to stderr naming the file, and does not create `audio.mp3.json`.
+11. `transcribe audio.mp3` where the job reaches `Succeeded` but downloading its result (listing files, or fetching the `Transcription`-kind file's `contentUrl`) fails or returns no file of kind `Transcription` exits with code 1, prints an error to stderr describing the failure, and does not create `audio.mp3.json`.
