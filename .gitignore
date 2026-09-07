@@ -22,3 +22,12 @@ htmlcov/
 dist/
 build/
 *.egg-info/
+
+# Terraform
+infra/.terraform/
+infra/*.tfstate
+infra/*.tfstate.*
+infra/*.tfvars
+!infra/*.tfvars.example
+infra/.terraform.lock.hcl
+infra/crash.log
