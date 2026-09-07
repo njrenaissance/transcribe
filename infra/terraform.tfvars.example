@@ -1,0 +1,8 @@
+resource_group_name = "transcribe-rg"
+location            = "eastus"
+speech_account_name = "transcribe-speech-prod"
+sku_name            = "S0"
+
+tags = {
+  project = "transcribe"
+}
