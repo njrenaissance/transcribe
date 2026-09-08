@@ -7,15 +7,21 @@ Quick navigation to the main source files, specifications, and infrastructure co
 ```
 transcribe/
 ├── src/
-│   ├── main.py              # CLI entrypoint & orchestration
-│   ├── cli.py               # Argument parsing & file validation
-│   ├── credentials.py       # Azure credential loading
-│   └── errors.py            # Exception hierarchy
+│   └── transcribe/
+│       ├── __init__.py          # Package marker
+│       ├── main.py              # CLI entrypoint & orchestration
+│       ├── cli.py               # Argument parsing & file validation
+│       ├── credentials.py       # Azure credential loading
+│       ├── errors.py            # Exception hierarchy
+│       ├── transcription.py     # Azure fast-transcription HTTP calls
+│       └── transform.py         # Result transformation & JSON output
 ├── tests/
 │   ├── conftest.py          # Pytest configuration & shared fixtures
 │   ├── test_main.py         # Entrypoint tests
 │   ├── test_cli.py          # CLI parsing & validation tests
-│   └── test_credentials.py  # Credential loading tests
+│   ├── test_credentials.py  # Credential loading tests
+│   ├── test_transcription.py # Transcription HTTP call tests
+│   └── test_transform.py     # Result transformation & output tests
 ├── spec/
 │   ├── spec.md              # Functional specification (authoritative)
 │   ├── build-order.md       # Issue sequencing & Phase 1/2 plan
@@ -61,13 +67,17 @@ transcribe/
 
 | File | Purpose | Status |
 |------|---------|--------|
-| [src/main.py](../src/main.py) | CLI entrypoint; orchestrates parse → validate → transcribe (future) | ✓ Done (partial: parsing/validation only) |
-| [src/cli.py](../src/cli.py) | Argument parsing & file validation (`validate_file`, `validate_files`) | ✓ Done (issues #6) |
-| [src/credentials.py](../src/credentials.py) | Load & validate Azure Speech env vars | ✓ Done (issue #7) |
-| [src/errors.py](../src/errors.py) | Exception hierarchy (`AppError`, `MissingFileError`, `TranscriptionError`, etc.) | ✓ Done |
-| [tests/test_main.py](../tests/test_main.py) | Tests for entrypoint behavior, exit codes, error messages | ✓ Done (partial) |
+| [src/transcribe/main.py](../src/transcribe/main.py) | CLI entrypoint; orchestrates parse → validate → transcribe → transform | ✓ Done (issues #6, #7, #8, #10, #11) |
+| [src/transcribe/cli.py](../src/transcribe/cli.py) | Argument parsing & file validation (`validate_file`, `validate_files`) | ✓ Done (issue #6) |
+| [src/transcribe/credentials.py](../src/transcribe/credentials.py) | Load & validate Azure Speech env vars | ✓ Done (issue #7) |
+| [src/transcribe/errors.py](../src/transcribe/errors.py) | Exception hierarchy (`AppError`, `MissingFileError`, `TranscriptionError`, etc.) | ✓ Done |
+| [src/transcribe/transcription.py](../src/transcribe/transcription.py) | Azure fast-transcription HTTP calls via httpx | ✓ Done (issue #8) |
+| [src/transcribe/transform.py](../src/transcribe/transform.py) | Transform Azure result to output schema & atomic JSON write | ✓ Done (issue #10) |
+| [tests/test_main.py](../tests/test_main.py) | Tests for entrypoint behavior, exit codes, error messages | ✓ Done |
 | [tests/test_cli.py](../tests/test_cli.py) | Tests for arg parsing, file existence, file type validation | ✓ Done (issue #6) |
 | [tests/test_credentials.py](../tests/test_credentials.py) | Tests for credential loading, env var validation | ✓ Done (issue #7) |
+| [tests/test_transcription.py](../tests/test_transcription.py) | Tests for Azure HTTP call & error handling | ✓ Done (issue #8) |
+| [tests/test_transform.py](../tests/test_transform.py) | Tests for schema transformation & output file writing | ✓ Done (issue #10) |
 
 ### Infrastructure & operations
 
@@ -134,7 +144,7 @@ transcribe/
 ### "I need to deploy or run the CLI in production"
 1. Set up Azure: [Operations - Azure resource provisioning](./operations.md#azure-resource-provisioning)
 2. Configure environment: [Quick Start - Environment configuration](./quickstart.md#environment-configuration)
-3. Run: `uv run python src/main.py audio.mp3`
+3. Run: `transcribe audio.mp3` (or `uv run transcribe audio.mp3`)
 4. Monitor: [Operations - Monitoring](./operations.md#monitoring-and-debugging)
 
 ### "I need to modify the infrastructure"
@@ -153,15 +163,15 @@ transcribe/
 
 ## Current progress
 
-**Phase 1 (local files, fast transcription) — In progress**
+**Phase 1 (local files, fast transcription) — ✓ Complete**
 
 | Issue | Title | Status |
 |-------|-------|--------|
 | #6 | feat: validate CLI arguments and reject missing/unsupported input files | ✓ Done |
 | #7 | feat: validate Azure Speech credentials from environment variables | ✓ Done |
-| #8 | feat: transcribe a local audio file via Azure fast (synchronous) transcription | 🔄 In progress |
-| #10 | feat: transform fast-transcription result into the output schema and write FILE.json | 🔄 Pending (depends on #8) |
-| #11 | feat: orchestrate end-to-end transcription for one or more files with per-file error handling | 🔄 Pending (depends on #6, #7, #8, #10) |
+| #8 | feat: transcribe a local audio file via Azure fast (synchronous) transcription | ✓ Done |
+| #10 | feat: transform fast-transcription result into the output schema and write FILE.json | ✓ Done |
+| #11 | feat: orchestrate end-to-end transcription for one or more files with per-file error handling | ✓ Done |
 
 **Phase 2 (blob-staged batch transcription) — Deferred**
 
@@ -174,15 +184,19 @@ See [spec/build-order.md](../spec/build-order.md) for detailed sequencing.
 ## Code entry points
 
 **For reading code:**
-- Main CLI entrypoint: [src/main.py](../src/main.py)
-- CLI parsing logic: [src/cli.py](../src/cli.py)
-- Credential loading: [src/credentials.py](../src/credentials.py)
-- Exception definitions: [src/errors.py](../src/errors.py)
+- Main CLI entrypoint: [src/transcribe/main.py](../src/transcribe/main.py)
+- CLI parsing logic: [src/transcribe/cli.py](../src/transcribe/cli.py)
+- Credential loading: [src/transcribe/credentials.py](../src/transcribe/credentials.py)
+- Transcription (Azure calls): [src/transcribe/transcription.py](../src/transcribe/transcription.py)
+- Result transformation: [src/transcribe/transform.py](../src/transcribe/transform.py)
+- Exception definitions: [src/transcribe/errors.py](../src/transcribe/errors.py)
 
 **For testing:**
 - CLI tests: [tests/test_cli.py](../tests/test_cli.py)
 - Credential tests: [tests/test_credentials.py](../tests/test_credentials.py)
 - Main tests: [tests/test_main.py](../tests/test_main.py)
+- Transcription tests: [tests/test_transcription.py](../tests/test_transcription.py)
+- Transform tests: [tests/test_transform.py](../tests/test_transform.py)
 - Shared fixtures: [tests/conftest.py](../tests/conftest.py)
 
 **For configuration:**

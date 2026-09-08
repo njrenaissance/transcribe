@@ -1,240 +1,345 @@
-# Source Map
+# CLI Flow — Argument Parsing through Output
 
-Quick navigation to the main source files, specifications, and infrastructure code.
+End-to-end walkthrough of what happens when you run `transcribe audio.mp3`.
 
-## Source structure
+## High-level flow
 
 ```
-transcribe/
-├── src/
-│   ├── main.py              # CLI entrypoint & orchestration
-│   ├── cli.py               # Argument parsing & file validation
-│   ├── credentials.py       # Azure credential loading
-│   └── errors.py            # Exception hierarchy
-├── tests/
-│   ├── conftest.py          # Pytest configuration & shared fixtures
-│   ├── test_main.py         # Entrypoint tests
-│   ├── test_cli.py          # CLI parsing & validation tests
-│   └── test_credentials.py  # Credential loading tests
-├── spec/
-│   ├── spec.md              # Functional specification (authoritative)
-│   ├── build-order.md       # Issue sequencing & Phase 1/2 plan
-│   └── adr/
-│       ├── 0001-azure-ai-speech-transcription.md
-│       ├── 0002-terraform-for-azure-infra.md
-│       └── 0003-fast-transcription-for-local-files.md
-├── infra/
-│   ├── README.md            # Terraform setup instructions
-│   ├── main.tf              # Azure resource definitions
-│   ├── variables.tf         # Variable declarations
-│   ├── outputs.tf           # Output values (endpoint, key)
-│   ├── versions.tf          # Provider versions
-│   ├── terraform.tfvars.example  # Example configuration
-│   └── terraform.tfstate*   # Local state (git-ignored)
-├── .claude/
-│   ├── rules/               # Coding standards (python-lang.md, pytest-rules.md, github-actions.md)
-│   ├── standards/           # Cross-project guidelines (error-handling.md, testing.md, wiki.md, etc.)
-│   ├── skills/              # Agent automation skills
-│   └── settings.json        # IDE/editor config hints
-├── .github/workflows/       # GitHub Actions CI/CD
-├── .pre-commit-config.yaml  # Local Git hooks config
-├── pyproject.toml           # Python project metadata, dependencies, tool config
-├── Makefile                 # Development commands (make setup, make test, etc.)
-├── README.md                # Project overview & getting started
-├── CLAUDE.md                # Agent briefing document
-└── AGENTS.md                # Agent task coordination
+User: transcribe audio.mp3
+   ↓
+[Parse args & load credentials]
+   ↓
+[For each file: transcribe → transform → write output]
+   ↓
+[Report errors & exit]
 ```
 
-## Key files by concern
+## Detailed execution path
 
-### Functional requirements & design
+### 1. Entry point (`src/transcribe/main.py`)
 
-| File | Purpose |
-|------|---------|
-| [spec/spec.md](../spec/spec.md) | **Authoritative spec:** input/output contract, done criteria, error codes |
-| [spec/build-order.md](../spec/build-order.md) | Issue sequencing, Phase 1 (current) vs Phase 2 (deferred) |
-| [spec/adr/0001](../spec/adr/0001-azure-ai-speech-transcription.md) | Why Azure AI Speech (not local ML) |
-| [spec/adr/0002](../spec/adr/0002-terraform-for-azure-infra.md) | Why Terraform (not manual Azure Portal, not remote state) |
-| [spec/adr/0003](../spec/adr/0003-fast-transcription-for-local-files.md) | Why fast endpoint (not batch), Phase 1 priority |
+**Function:** `main(argv: list[str] | None = None) → int`
 
-### Implementation
-
-| File | Purpose | Status |
-|------|---------|--------|
-| [src/main.py](../src/main.py) | CLI entrypoint; orchestrates parse → validate → transcribe (future) | ✓ Done (partial: parsing/validation only) |
-| [src/cli.py](../src/cli.py) | Argument parsing & file validation (`validate_file`, `validate_files`) | ✓ Done (issues #6) |
-| [src/credentials.py](../src/credentials.py) | Load & validate Azure Speech env vars | ✓ Done (issue #7) |
-| [src/errors.py](../src/errors.py) | Exception hierarchy (`AppError`, `MissingFileError`, `TranscriptionError`, etc.) | ✓ Done |
-| [tests/test_main.py](../tests/test_main.py) | Tests for entrypoint behavior, exit codes, error messages | ✓ Done (partial) |
-| [tests/test_cli.py](../tests/test_cli.py) | Tests for arg parsing, file existence, file type validation | ✓ Done (issue #6) |
-| [tests/test_credentials.py](../tests/test_credentials.py) | Tests for credential loading, env var validation | ✓ Done (issue #7) |
-
-### Infrastructure & operations
-
-| File | Purpose |
-|------|---------|
-| [infra/README.md](../infra/README.md) | Terraform setup: provisioning, extracting credentials, state management |
-| [infra/main.tf](../infra/main.tf) | Azure resource group, Cognitive Services Speech account |
-| [infra/variables.tf](../infra/variables.tf) | Terraform variables (region, account name, SKU) |
-| [infra/outputs.tf](../infra/outputs.tf) | Outputs: endpoint URL, API key |
-| [infra/terraform.tfvars.example](../infra/terraform.tfvars.example) | Example Terraform values (git-ignored when copied to `.tfvars`) |
-
-### Configuration & standards
-
-| File | Purpose |
-|------|---------|
-| [pyproject.toml](../pyproject.toml) | Python project metadata, dependencies, pytest/coverage/ruff/mypy config |
-| [.pre-commit-config.yaml](../.pre-commit-config.yaml) | Local Git hooks (ruff, mypy, pytest) |
-| [Makefile](../Makefile) | `make setup`, `make test`, `make lint`, etc. |
-| [.claude/rules/python-lang.md](../.claude/rules/python-lang.md) | Python coding standards |
-| [.claude/rules/pytest-rules.md](../.claude/rules/pytest-rules.md) | Pytest/testing conventions |
-| [.claude/standards/error-handling.md](../.claude/standards/error-handling.md) | Exception hierarchy design |
-| [.claude/standards/testing.md](../.claude/standards/testing.md) | Testing strategy & coverage requirements |
-| [.claude/standards/decisions.md](../.claude/standards/decisions.md) | ADR (Architecture Decision Record) guidelines |
-| [.claude/standards/wiki.md](../.claude/standards/wiki.md) | OpenWiki documentation standards |
-
-### CI/CD
-
-| File | Purpose |
-|------|---------|
-| [.github/workflows/unit-tests.yml](../.github/workflows/unit-tests.yml) | Runs `pytest -m unit` on PR/push |
-| [.github/workflows/integration-tests.yml](../.github/workflows/integration-tests.yml) | Runs `pytest -m integration` (deferred, no tests yet) |
-| [.github/workflows/format-lint.yml](../.github/workflows/format-lint.yml) | Runs `ruff format --check` + `ruff check` |
-| [.github/workflows/type-check.yml](../.github/workflows/type-check.yml) | Runs `mypy src` |
-| [.github/workflows/openwiki-update.yml](../.github/workflows/openwiki-update.yml) | Regenerates `/openwiki` docs (informational) |
-| [.github/workflows/template-sync.yml](../.github/workflows/template-sync.yml) | Checks template sync status (manual trigger) |
-
-## Navigation by workflow
-
-### "I need to understand the project"
-1. Start here: [Quick Start](./quickstart.md)
-2. Read: [Specification](./specification.md)
-3. Dive in: [Architecture](./architecture.md)
-4. Check decisions: [spec/adr/](../spec/adr/)
-
-### "I want to add a new feature"
-1. Define requirements in [spec/spec.md](../spec/spec.md)
-2. Write a design ADR (see [.claude/standards/decisions.md](../.claude/standards/decisions.md))
-3. Create GitHub issues, sequenced in [spec/build-order.md](../spec/build-order.md)
-4. Implement & test following [Architecture](./architecture.md) and [Testing Guide](./testing.md)
-5. Update [spec/spec.md](../spec/spec.md) if requirements changed
-6. Regenerate docs: `openwiki code --update`
-
-### "I need to set up a development environment"
-1. Follow [Quick Start - Setup](./quickstart.md#setup-one-time)
-2. Run: `make setup`
-3. Configure Azure: [Operations - Azure resource provisioning](./operations.md#azure-resource-provisioning)
-
-### "Tests are failing"
-1. Run locally: `uv run pytest -v`
-2. Check what's being tested: [Testing Guide](./testing.md)
-3. Review error messages and stack traces
-4. Fix code, re-run: `uv run pytest`
-
-### "I need to deploy or run the CLI in production"
-1. Set up Azure: [Operations - Azure resource provisioning](./operations.md#azure-resource-provisioning)
-2. Configure environment: [Quick Start - Environment configuration](./quickstart.md#environment-configuration)
-3. Run: `uv run python src/main.py audio.mp3`
-4. Monitor: [Operations - Monitoring](./operations.md#monitoring-and-debugging)
-
-### "I need to modify the infrastructure"
-1. Read: [infra/README.md](../infra/README.md)
-2. Edit: [infra/terraform.tfvars](../infra/terraform.tfvars) (or `.example`)
-3. Plan: `terraform plan -var-file=terraform.tfvars`
-4. Apply: `terraform apply -var-file=terraform.tfvars`
-5. Extract credentials: `terraform output -raw speech_endpoint`
-
-### "I need to sync with the template"
-1. Check status: `uvx cruft check`
-2. Update: `uvx cruft update`
-3. Resolve conflicts (`.rej` files)
-4. Test: `uv run pytest && uv run ruff check . && uv run mypy src`
-5. Commit: `git add . && git commit -m "chore: update from template"`
-
-## Current progress
-
-**Phase 1 (local files, fast transcription) — In progress**
-
-| Issue | Title | Status |
-|-------|-------|--------|
-| #6 | feat: validate CLI arguments and reject missing/unsupported input files | ✓ Done |
-| #7 | feat: validate Azure Speech credentials from environment variables | ✓ Done |
-| #8 | feat: transcribe a local audio file via Azure fast (synchronous) transcription | 🔄 In progress |
-| #10 | feat: transform fast-transcription result into the output schema and write FILE.json | 🔄 Pending (depends on #8) |
-| #11 | feat: orchestrate end-to-end transcription for one or more files with per-file error handling | 🔄 Pending (depends on #6, #7, #8, #10) |
-
-**Phase 2 (blob-staged batch transcription) — Deferred**
-
-| Issue | Title | Status |
-|-------|-------|--------|
-| #9 | feat: poll Azure batch transcription job until terminal status or timeout | ⏳ Deferred (Phase 2) |
-
-See [spec/build-order.md](../spec/build-order.md) for detailed sequencing.
-
-## Code entry points
-
-**For reading code:**
-- Main CLI entrypoint: [src/main.py](../src/main.py)
-- CLI parsing logic: [src/cli.py](../src/cli.py)
-- Credential loading: [src/credentials.py](../src/credentials.py)
-- Exception definitions: [src/errors.py](../src/errors.py)
-
-**For testing:**
-- CLI tests: [tests/test_cli.py](../tests/test_cli.py)
-- Credential tests: [tests/test_credentials.py](../tests/test_credentials.py)
-- Main tests: [tests/test_main.py](../tests/test_main.py)
-- Shared fixtures: [tests/conftest.py](../tests/conftest.py)
-
-**For configuration:**
-- Project metadata & tool config: [pyproject.toml](../pyproject.toml)
-- Git hooks: [.pre-commit-config.yaml](../.pre-commit-config.yaml)
-- Development shortcuts: [Makefile](../Makefile)
-
-## Search tips
-
-| Question | Where to look |
-|----------|----------------|
-| What are the done criteria for issue #8? | [spec/spec.md](../spec/spec.md) - search "done criteria" |
-| How is CredentialError used? | `grep -r CredentialError src/ tests/` |
-| Which tests validate file extensions? | [tests/test_cli.py](../tests/test_cli.py) - test functions with "extension" |
-| What's the Azure endpoint URL format? | [spec/spec.md](../spec/spec.md) or [src/credentials.py](../src/credentials.py) comments |
-| How do I add a new exception type? | [src/errors.py](../src/errors.py) - define class, inherit from AppError |
-| What's the pytest configuration? | [pyproject.toml](../pyproject.toml) - search `[tool.pytest]` |
-
-## Useful commands
-
-```bash
-# Build/run
-make setup                    # One-time: install deps, git hooks
-uv sync                       # Install dependencies
-uv run python src/main.py FILE.mp3
-
-# Test
-uv run pytest                # All tests
-uv run pytest -m unit        # Unit tests only
-uv run pytest tests/test_cli.py::test_parse_args_returns_paths_for_each_argument
-
-# Lint & format
-uv run ruff check .          # Report issues
-uv run ruff format .         # Fix formatting
-uv run mypy src              # Type check
-
-# Infrastructure
-cd infra && terraform plan -var-file=terraform.tfvars
-cd infra && terraform apply -var-file=terraform.tfvars
-terraform output -raw speech_endpoint
-
-# Documentation
-openwiki code --init         # Initial wiki generation
-openwiki code --update       # Regenerate wiki after code changes
+```python
+def main(argv: list[str] | None = None) -> int:
+    paths = parse_args(sys.argv[1:] if argv is None else argv)  # ← Step 1
+    
+    try:
+        credentials = load_azure_credentials()  # ← Step 2
+    except AppError as err:
+        print(f"Error: {err}", file=sys.stderr)
+        return 1
+    
+    had_failure = False
+    for path in paths:  # ← Step 3: per-file loop
+        try:
+            _process_file(path, credentials)
+        except AppError as err:
+            print(f"Error: {err}", file=sys.stderr)
+            had_failure = True
+    
+    return 1 if had_failure else 0  # ← Exit code
 ```
 
-## References
+**Why this structure:**
+- Parse and validate all CLI args upfront (fail fast)
+- Load credentials once (not per-file)
+- Process each file independently (collect errors, don't stop on first failure)
+- Report all errors to stderr, then exit
 
-- [Quick Start](./quickstart.md)
-- [Architecture & Workflows](./architecture.md)
-- [Specification & Requirements](./specification.md)
-- [Testing Guide](./testing.md)
-- [Operations & Infrastructure](./operations.md)
-- [spec/spec.md](../spec/spec.md) — Authoritative functional specification
-- [README.md](../README.md) — Project overview and getting started
+### 2. Parse arguments (`src/transcribe/cli.py:parse_args`)
+
+**Input:** `argv = ["audio.mp3", "interview.wav"]`
+
+```python
+def parse_args(argv: list[str]) -> list[Path]:
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)  # Let argparse handle usage & exit code 2
+    return [Path(f) for f in args.files]
+```
+
+**Output:** `[Path("audio.mp3"), Path("interview.wav")]`
+
+**Error cases:**
+- No args provided: argparse exits with code 2 and prints usage
+- Invalid options: argparse exits with code 2
+
+### 3. Load credentials (`src/transcribe/credentials.py:load_azure_credentials`)
+
+**Input:** Environment variables `AZURE_SPEECH_ENDPOINT` and `AZURE_SPEECH_KEY`
+
+```python
+def load_azure_credentials() -> AzureCredentials:
+    endpoint = os.environ.get("AZURE_SPEECH_ENDPOINT", "")
+    key = os.environ.get("AZURE_SPEECH_KEY", "")
+    
+    missing = []
+    if not endpoint:
+        missing.append("AZURE_SPEECH_ENDPOINT")
+    if not key:
+        missing.append("AZURE_SPEECH_KEY")
+    
+    if missing:
+        raise CredentialError(f"Missing required environment variable(s): {', '.join(missing)}")
+    
+    return AzureCredentials(endpoint=endpoint, key=key)
+```
+
+**Output:** `AzureCredentials(endpoint="https://...", key="sk-...")`
+
+**Error cases:**
+- Either env var missing or empty: raises `CredentialError`
+- Caught in `main()`, printed to stderr, exits code 1
+
+### 4. Process one file (`src/transcribe/main.py:_process_file`)
+
+```python
+def _process_file(path: Path, credentials: AzureCredentials) -> None:
+    validate_file(path)  # ← Step 4a: validate
+    result = transcribe_file(path, credentials)  # ← Step 4b: transcribe
+    output = transform_result(result, path)  # ← Step 4c: transform
+    write_transcript_json(output, path)  # ← Step 4d: write
+```
+
+#### 4a. Validate file (`src/transcribe/cli.py:validate_file`)
+
+**Input:** `Path("audio.mp3")`
+
+```python
+def validate_file(path: Path) -> None:
+    if not path.exists():
+        raise MissingFileError(path)
+    
+    if path.suffix.lower() not in SUPPORTED_EXTENSIONS:  # {".mp3", ".wav"}
+        raise UnsupportedFileTypeError(path)
+```
+
+**Exit conditions:**
+- File not found: raises `MissingFileError`
+- Extension not in {".mp3", ".wav"}: raises `UnsupportedFileTypeError`
+
+#### 4b. Transcribe via Azure (`src/transcribe/transcription.py:transcribe_file`)
+
+**Input:** `Path("audio.mp3")`, `AzureCredentials`
+
+```python
+def transcribe_file(
+    path: Path,
+    credentials: AzureCredentials,
+    requested_locale: str = DEFAULT_LOCALE,
+) -> dict[str, Any]:
+    # Read file from disk
+    with open(path, "rb") as f:
+        audio_bytes = f.read()
+    
+    # Build multipart request
+    response = httpx.post(
+        f"{credentials.endpoint}/cognitiveservices/v1/speechtotext/transcriptions:transcribe",
+        params={"api-version": "2025-10-15"},
+        headers={"Ocp-Apim-Subscription-Key": credentials.key},
+        files={
+            "audio": audio_bytes,
+            "definition": json.dumps({"locales": [requested_locale]})
+        },
+        timeout=300,
+    )
+    
+    if response.status_code != 200:
+        raise TranscriptionError(path, f"HTTP {response.status_code}")
+    
+    return response.json()
+```
+
+**Azure response format:**
+```json
+{
+  "durationMilliseconds": 12340,
+  "phrases": [
+    {"offsetMilliseconds": 0, "durationMilliseconds": 2500, "text": "Hello world", "locale": "en-US"}
+  ]
+}
+```
+
+**Error cases:**
+- Network timeout: raises `TranscriptionTimeoutError`
+- Non-2xx response: raises `TranscriptionError`
+
+#### 4c. Transform result (`src/transcribe/transform.py:transform_result`)
+
+**Input:** Azure result dict + `Path("audio.mp3")`
+
+```python
+def transform_result(
+    result: dict[str, Any],
+    source_path: Path,
+    requested_locale: str = "en-US",
+) -> TranscriptOutput:
+    phrases = result.get("phrases") or []
+    if not phrases:
+        raise EmptyTranscriptionResultError(source_path)
+    
+    segments: list[Segment] = sorted(
+        (
+            Segment(
+                start=phrase["offsetMilliseconds"] / 1000,
+                end=(phrase["offsetMilliseconds"] + phrase["durationMilliseconds"]) / 1000,
+                text=phrase["text"],
+            )
+            for phrase in phrases
+        ),
+        key=lambda segment: segment["start"],
+    )
+    
+    return TranscriptOutput(
+        source_file=source_path.name,
+        language=phrases[0].get("locale") or requested_locale,
+        duration_seconds=result["durationMilliseconds"] / 1000,
+        segments=segments,
+    )
+```
+
+**Output schema:**
+```json
+{
+  "source_file": "audio.mp3",
+  "language": "en-US",
+  "duration_seconds": 12.34,
+  "segments": [
+    {"start": 0.0, "end": 2.5, "text": "Hello world"}
+  ]
+}
+```
+
+**Error cases:**
+- No phrases in result: raises `EmptyTranscriptionResultError`
+
+#### 4d. Write output (`src/transcribe/transform.py:write_transcript_json`)
+
+**Input:** `TranscriptOutput` + `Path("audio.mp3")`
+
+```python
+def write_transcript_json(output: TranscriptOutput, source_path: Path) -> Path:
+    destination = source_path.with_name(source_path.name + ".json")  # audio.mp3.json
+    
+    # Write to temp file first, then atomically rename
+    fd, tmp_name = tempfile.mkstemp(dir=destination.parent, ...)
+    tmp_path = Path(tmp_name)
+    
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+            json.dump(output, tmp_file, indent=2)
+        os.replace(tmp_path, destination)  # ← Atomic rename
+    except OSError as err:
+        tmp_path.unlink(missing_ok=True)
+        raise OutputWriteError(destination, str(err)) from err
+    
+    return destination
+```
+
+**Side effects:**
+- Creates `audio.mp3.json` in the same directory as the input file
+- Uses atomic rename to ensure no partial/corrupt files on failure
+
+**Error cases:**
+- Permission denied: raises `OutputWriteError`
+- Disk full: raises `OutputWriteError`
+
+### 5. Exit and error reporting
+
+**Success case** (all files processed):
+```
+$ transcribe audio.mp3 interview.wav
+# No output
+$ echo $?
+0
+```
+
+**Failure case** (one or more files failed):
+```
+$ transcribe audio.mp3 missing.wav
+Error: file not found: missing.wav
+$ echo $?
+1
+```
+
+**Multiple failures** (errors collected and reported):
+```
+$ transcribe a.mp3 missing.wav b.mp3 broken.wav
+Error: file not found: missing.wav
+Error: HTTP 401 when calling Azure for broken.wav
+$ echo $?
+1
+```
+
+## Exception hierarchy
+
+All exceptions inherit from `AppError`. Caught in `main()`, each prints `f"Error: {err}"` and sets `had_failure = True`.
+
+```
+AppError (base)
+├── MissingFileError(path)        ← File doesn't exist
+├── UnsupportedFileTypeError(path) ← Extension not .mp3 or .wav
+├── CredentialError               ← Env var missing
+├── TranscriptionError(path, reason) ← HTTP non-2xx from Azure
+├── TranscriptionTimeoutError(path, timeout) ← Network timeout
+├── EmptyTranscriptionResultError(path) ← Azure returned no phrases
+└── OutputWriteError(path, reason) ← Can't write JSON file
+```
+
+## Key design decisions
+
+1. **Upfront parsing & validation:** All CLI args validated before any credentials/Azure calls → fail fast on bad input
+2. **Credentials loaded once:** Not per-file, saves repeated env var lookups
+3. **Per-file error collection:** One file's failure doesn't stop the rest; all errors reported before exit
+4. **Atomic output writes:** Temp file → rename ensures no corrupt .json files
+5. **Single-threaded:** Files processed sequentially (Phase 2 may add parallelization)
+
+## Common error scenarios
+
+### No arguments
+```
+$ transcribe
+usage: transcribe [-h] files [files ...]
+transcribe: error: the following arguments are required: files
+$ echo $?
+2
+```
+
+### Missing env var
+```
+$ transcribe audio.mp3
+Error: Missing required environment variable(s): AZURE_SPEECH_KEY
+$ echo $?
+1
+```
+
+### File not found
+```
+$ transcribe missing.mp3
+Error: file not found: missing.mp3
+$ echo $?
+1
+```
+
+### Unsupported extension
+```
+$ transcribe audio.flac
+Error: unsupported file type: audio.flac (supported: .mp3, .wav)
+$ echo $?
+1
+```
+
+### Azure error (e.g., invalid key)
+```
+$ transcribe audio.mp3  # With wrong AZURE_SPEECH_KEY
+Error: HTTP 401 when calling Azure for audio.mp3
+$ echo $?
+1
+```
+
+## Related documentation
+
+- **Architecture:** [architecture/overview.md](../architecture/overview.md) — Component relationships and design rationale
+- **Testing:** [testing/overview.md](../testing/overview.md) — How to test each layer
+- **Specification:** [domain/spec-and-contracts.md](../domain/spec-and-contracts.md) — Input/output contracts
+- **Azure Integration:** [integrations/azure-speech.md](../integrations/azure-speech.md) — Endpoint details, request/response format

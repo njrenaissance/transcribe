@@ -11,18 +11,19 @@ User → CLI args
    ↓
 [Load credentials]  (credentials.py)
    ↓
-[POST to Azure fast-transcription endpoint]  (azure call via httpx)
-   ↓
-[Transform result → output schema]
-   ↓
-[Write FILE.json]
+[For each file:]
+  ├→ [Transcribe: POST to Azure]  (transcription.py)
+  ├→ [Transform result → schema]  (transform.py)
+  └→ [Write FILE.json atomically]  (transform.py)
    ↓
 User ← exit code + stderr errors
 ```
 
 ## Layered architecture
 
-### 1. CLI Layer (`cli.py`)
+**Package structure:** All core code lives in `src/transcribe/` — a Python package exposed by the `transcribe` CLI entrypoint.
+
+### 1. CLI Layer (`src/transcribe/cli.py`)
 
 **Purpose:** Parse CLI arguments and validate input files before any system call.
 
@@ -49,7 +50,7 @@ User ← exit code + stderr errors
 - No wasted API calls
 - Clear error messages before any auth is attempted
 
-### 2. Credentials Layer (`credentials.py`)
+### 2. Credentials Layer (`src/transcribe/credentials.py`)
 
 **Purpose:** Load and validate Azure Speech credentials from environment variables.
 
@@ -73,7 +74,7 @@ class AzureCredentials:
 - The credential contract (env var names, requirements) visible and testable
 - Thread-safe retrieval (no module-level state)
 
-### 3. Error Handling (`errors.py`)
+### 3. Error Handling (`src/transcribe/errors.py`)
 
 **Purpose:** Domain-specific exception hierarchy for expected failure modes.
 
@@ -84,7 +85,9 @@ AppError (base)
 ├── UnsupportedFileTypeError(path: Path)
 ├── CredentialError
 ├── TranscriptionError(path: Path, reason: str)
-└── TranscriptionTimeoutError(path: Path, timeout: float)
+├── TranscriptionTimeoutError(path: Path, timeout: float)
+├── EmptyTranscriptionResultError(path: Path)
+└── OutputWriteError(path: Path, reason: str)
 ```
 
 **Design rationale:**
@@ -99,32 +102,79 @@ AppError (base)
 - Makes each error mode distinguishable in tests and caller code
 - Supports per-file error collection in Phase 1 orchestration ([issue #11](https://github.com/njrenaissance/transcribe/issues/11))
 
-### 4. Main Entrypoint (`main.py`)
+### 4. Transcription Layer (`src/transcribe/transcription.py`)
+
+**Purpose:** Make the Azure fast-transcription HTTP call and return the parsed result.
+
+**Key function:**
+- `transcribe_file(path: Path, credentials: AzureCredentials) → dict[str, Any]`
+  - Reads audio file from disk
+  - POSTs to Azure's `/speechtotext/transcriptions:transcribe` endpoint
+  - Sends `Ocp-Apim-Subscription-Key` header with `credentials.key`
+  - Returns parsed JSON response: `{"durationMilliseconds": ..., "phrases": [...]}`
+  - Raises `TranscriptionError` on non-2xx response
+  - Raises `TranscriptionTimeoutError` on timeout
+
+**Why separate:** This layer encapsulates all Azure HTTP details:
+- Keeps main entrypoint focused on orchestration
+- Makes the Azure contract testable in isolation
+- Centralizes error handling for network/API failures
+
+### 5. Transform Layer (`src/transcribe/transform.py`)
+
+**Purpose:** Convert Azure's transcription result into the project's output schema and write it atomically to disk.
+
+**Key functions:**
+- `transform_result(result: dict, source_path: Path, requested_locale: str = "en-US") → TranscriptOutput`
+  - Extracts phrases from Azure result
+  - Converts timestamps from milliseconds to seconds
+  - Raises `EmptyTranscriptionResultError` if no phrases found
+  - Returns `TranscriptOutput` TypedDict with source_file, language, duration_seconds, segments
+
+- `write_transcript_json(output: TranscriptOutput, source_path: Path) → Path`
+  - Writes to a temp file first, then atomically renames into place
+  - Ensures partial/corrupt writes never leave a broken destination
+  - Raises `OutputWriteError` on permission/disk failures
+
+**Why separate:** Transformation is domain logic, distinct from HTTP and orchestration:
+- Keeps Azure response parsing logic independent
+- Makes output schema testable without network calls
+- Atomic writes guarantee data integrity
+
+### 6. Main Entrypoint (`src/transcribe/main.py`)
 
 **Purpose:** Orchestrate the pipeline and convert exceptions to exit codes.
 
 ```python
 def main(argv: list[str] | None = None) -> int:
+    paths = parse_args(sys.argv[1:] if argv is None else argv)
+    
     try:
-        paths = parse_args(sys.argv[1:] if argv is None else argv)
-        validate_files(paths)
+        credentials = load_azure_credentials()
     except AppError as err:
         print(f"Error: {err}", file=sys.stderr)
         return 1
-    return 0
+    
+    had_failure = False
+    for path in paths:
+        try:
+            _process_file(path, credentials)
+        except AppError as err:
+            print(f"Error: {err}", file=sys.stderr)
+            had_failure = True
+    
+    return 1 if had_failure else 0
 ```
 
-**Current behavior (Phase 1):**
-- Parses and validates all files
-- Stops at first error
-- Reports error to stderr; exits 1
-- Does not yet transcribe files (issues #8 and #10 will add that)
-
-**Future behavior (Phase 1 completion, issue #11):**
-- Process each file individually
-- Collect per-file errors
-- Transcribe successful files
-- Report all errors at the end
+**Behavior (Phase 1, complete):**
+- Parses and validates all files upfront
+- Loads credentials once
+- Processes each file independently:
+  - Transcribe via Azure
+  - Transform result
+  - Write JSON
+- Collects per-file errors
+- Reports all errors to stderr
 - Exit 0 only if all files succeeded; 1 if any failed
 
 **Exception handling:**
@@ -167,9 +217,7 @@ User ← exit code 1, stderr has error message
 User: transcribe audio.mp3
       (AZURE_SPEECH_KEY unset)
    ↓
-parse_args() + validate_files() ✓
-   ↓
-[Issue #8 will call load_azure_credentials()]
+parse_args() → [Path("audio.mp3")]
    ↓
 load_azure_credentials()
    ├→ endpoint = os.environ.get("AZURE_SPEECH_ENDPOINT") → "https://..."
@@ -185,12 +233,12 @@ return 1
 User ← exit code 1
 ```
 
-## HTTP call (future: issues #8, #10)
+## HTTP call and transformation (issues #8, #10 — complete)
 
-When [issue #8](https://github.com/njrenaissance/transcribe/issues/8) adds transcription, the flow will be:
+The transcription and output pipeline is now fully implemented:
 
+**1. Transcription call** (`transcription.py:transcribe_file`):
 ```python
-# POST to Azure fast-transcription endpoint
 POST /cognitiveservices/v1/speechtotext/transcriptions:transcribe
   ?api-version=2025-10-15
   
@@ -211,17 +259,23 @@ Response (2xx):
   }
 ```
 
-**Transform to output schema** (issue #10):
+**2. Transformation** (`transform.py:transform_result`):
 ```json
 {
   "source_file": "audio.mp3",
-  "language": "en",
+  "language": "en-US",
   "duration_seconds": 12.34,
   "segments": [
     {"start": 0.0, "end": 2.5, "text": "Hello world"}
   ]
 }
 ```
+
+**3. Atomic write** (`transform.py:write_transcript_json`):
+- Writes to a temporary file in the same directory first
+- Atomically renames temp → destination using `os.replace()`
+- Ensures mid-write failures never leave a corrupt file
+- Raises `OutputWriteError` on I/O permission or disk-full errors
 
 ## Design decisions
 
@@ -248,41 +302,56 @@ See [ADRs](../spec/adr/) for detailed rationale:
 
 See [Testing Guide](./testing.md) for detailed guidance.
 
-**Current test coverage (Phase 1):**
-- Unit tests for CLI parsing (`test_cli.py`)
+**Test coverage (Phase 1 — complete):**
+- **Unit tests for CLI parsing** (`test_cli.py`)
   - Argument parsing (with/without arguments)
   - File existence and extension validation
   - Parametrized tests for case-insensitive extension matching
 
-- Unit tests for credentials (`test_credentials.py`)
+- **Unit tests for credentials** (`test_credentials.py`)
   - Loading when both env vars present
   - Raising `CredentialError` when one or both missing
   - Naming exactly which variable(s) are missing
 
-- Unit tests for main entrypoint (`test_main.py`)
-  - Exit code 0 on success
-  - Exit code 1 on AppError
-  - Error message to stderr
+- **Unit tests for transcription** (`test_transcription.py`)
+  - Mocking Azure endpoint responses
+  - Testing error cases (non-2xx, timeouts)
+  - Parsing response JSON
 
-**Integration tests (deferred):** Will test end-to-end flow with mock or real Azure endpoint after issue #8 (transcription call) is implemented.
+- **Unit tests for transformation** (`test_transform.py`)
+  - Mapping Azure phrases to output segments
+  - Handling empty result (EmptyTranscriptionResultError)
+  - Atomic JSON write (temp file → destination)
+  - Edge cases: missing locale, unsorted phrases
 
-## Next steps for implementation
+- **Integration tests** (`test_main.py`)
+  - Full orchestration with mocked Azure endpoint
+  - Per-file error handling
+  - Exit codes: 0 on success, 1 on any failure
 
-1. **Issue #8:** Add `transcribe_file(path: Path, credentials: AzureCredentials) → dict` function to make the Azure call and return the raw response
-   - Use `httpx.post()` to send multipart request
-   - Handle non-2xx responses as `TranscriptionError`
-   - Handle timeouts as `TranscriptionTimeoutError`
+**Coverage target:** Minimum 70% (enforced by `pytest-cov` in `pyproject.toml`)
 
-2. **Issue #10:** Add `transform_result(azure_response: dict, source_file: str) → dict` to map Azure's response to output schema
-   - Extract `durationMilliseconds`, `phrases`
-   - Build segments list with start/end/text
-   - Infer language from phrases' `locale` field
+## Phase 2: Batch transcription (deferred)
 
-3. **Issue #11:** Update `main()` to orchestrate end-to-end:
-   - For each file, call `load_azure_credentials()`, `transcribe_file()`, `transform_result()`, write JSON
-   - Collect per-file errors
-   - Report all errors to stderr
-   - Exit 0 only if all files succeeded
+Phase 2 will add asynchronous batch transcription for large files (>500 MB or >5 hours) via Azure Blob Storage:
 
-See [spec.md](../spec/spec.md) for detailed requirements and done criteria for each issue.
+- **Issue #9:** Poll Azure batch transcription job until terminal status or timeout
+- Blob upload with SAS tokens
+- Batch job submission and status polling
+- Partial output collection (don't wait for all files)
+
+See [spec/adr/0003](../spec/adr/0003-fast-transcription-for-local-files.md) and [spec/build-order.md](../spec/build-order.md) for Phase 2 planning.
+
+## Phase 1 completion checklist
+
+✅ All done criteria met:
+- File validation (extension, existence) — issue #6
+- Azure credential validation — issue #7
+- Synchronous fast transcription via Azure — issue #8
+- Result transformation and atomic JSON output — issue #10
+- End-to-end orchestration with per-file error handling — issue #11
+- Test coverage ≥ 70%
+- CI/CD: lint, type-check, and unit tests all passing
+
+See [spec.md](../spec/spec.md) for detailed done criteria and [source-map.md](../source-map.md) for current progress.
 

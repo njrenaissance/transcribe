@@ -26,24 +26,32 @@ Cross-cutting concerns enabled for this project:
 
 ```text
 ├── src/
-│   └── main.py       # greet()
+│   └── transcribe/
+│       ├── cli.py           # argument parsing, input-file validation
+│       ├── credentials.py   # Azure Speech credential loading
+│       ├── transcription.py # fast (synchronous) transcription HTTP call
+│       ├── transform.py     # result -> output schema, write FILE.json
+│       ├── errors.py        # exception hierarchy
+│       └── main.py          # CLI entrypoint / orchestration
 ├── tests/
-│   └── test_main.py  # test for greet()
 └── pyproject.toml
 ```
+
+`transcribe` is a real installed package (`[build-system]`/`[project.scripts]`
+in `pyproject.toml`), not a loose script — `uv run transcribe` is the entrypoint.
 
 ## Commands
 
 ```bash
-make setup                 # one-time: install deps + local Git hooks
-uv sync                    # install dependencies
-uv run python src/main.py  # run
-uv run pytest              # test
-uv run ruff check .        # lint
-uv run ruff format .       # format
-uv run mypy src            # type-check
+make setup                         # one-time: install deps + local Git hooks
+uv sync                            # install dependencies
+uv run transcribe FILE [FILE ...]  # run
+uv run pytest                      # test
+uv run ruff check .                # lint
+uv run ruff format .               # format
+uv run mypy src                    # type-check
 uv run pre-commit run --all-files  # run all Git hooks manually
-uvx cruft check            # is this project behind its template?
+uvx cruft check                    # is this project behind its template?
 ```
 
 ## Git hooks

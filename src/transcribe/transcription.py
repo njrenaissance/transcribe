@@ -6,12 +6,12 @@ from typing import Any
 
 import httpx
 
-from credentials import AzureCredentials
-from errors import TranscriptionError, TranscriptionTimeoutError
+from .credentials import AzureCredentials
+from .errors import TranscriptionError, TranscriptionTimeoutError
 
 _API_VERSION = "2025-10-15"
 _DEFAULT_TIMEOUT_SECONDS = 60.0
-_DEFAULT_LOCALE = "en-US"
+DEFAULT_LOCALE = "en-US"
 _AUDIO_CONTENT_TYPES = {".mp3": "audio/mpeg", ".wav": "audio/wav"}
 _DEFAULT_AUDIO_CONTENT_TYPE = "application/octet-stream"
 
@@ -41,7 +41,7 @@ def transcribe_file(
     url = f"{credentials.endpoint}/speechtotext/transcriptions:transcribe?api-version={_API_VERSION}"
     headers = {"Ocp-Apim-Subscription-Key": credentials.key}
     audio_content_type = _AUDIO_CONTENT_TYPES.get(path.suffix.lower(), _DEFAULT_AUDIO_CONTENT_TYPE)
-    definition = json.dumps({"locales": [_DEFAULT_LOCALE]}).encode("utf-8")
+    definition = json.dumps({"locales": [DEFAULT_LOCALE]}).encode("utf-8")
     files = {
         "audio": (path.name, path.read_bytes(), audio_content_type),
         "definition": (None, definition, "application/json"),

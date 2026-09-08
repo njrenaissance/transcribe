@@ -3,7 +3,7 @@
 import os
 from dataclasses import dataclass
 
-from errors import CredentialError
+from .errors import CredentialError
 
 _ENDPOINT_VAR = "AZURE_SPEECH_ENDPOINT"
 _KEY_VAR = "AZURE_SPEECH_KEY"

@@ -1,7 +1,7 @@
 import pytest
 
-from credentials import AzureCredentials, load_azure_credentials
-from errors import CredentialError
+from transcribe.credentials import AzureCredentials, load_azure_credentials
+from transcribe.errors import CredentialError
 
 _ENDPOINT_VAR = "AZURE_SPEECH_ENDPOINT"
 _KEY_VAR = "AZURE_SPEECH_KEY"

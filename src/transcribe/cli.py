@@ -7,7 +7,7 @@ list, a nonexistent file, or an unsupported file extension.
 import argparse
 from pathlib import Path
 
-from errors import MissingFileError, UnsupportedFileTypeError
+from .errors import MissingFileError, UnsupportedFileTypeError
 
 SUPPORTED_EXTENSIONS = {".mp3", ".wav"}
 
@@ -36,9 +36,3 @@ def validate_file(path: Path) -> None:
         raise MissingFileError(path)
     if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
         raise UnsupportedFileTypeError(path)
-
-
-def validate_files(paths: list[Path]) -> None:
-    """Validate each input file in turn."""
-    for path in paths:
-        validate_file(path)
