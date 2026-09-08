@@ -31,3 +31,6 @@ infra/*.tfvars
 !infra/*.tfvars.example
 infra/.terraform.lock.hcl
 infra/crash.log
+
+# data
+data/
