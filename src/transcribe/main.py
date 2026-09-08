@@ -31,9 +31,8 @@ def main(argv: list[str] | None = None) -> int:
     failure is isolated and reported without stopping the rest.
     """
     dotenv.load_dotenv()
-    paths = parse_args(sys.argv[1:] if argv is None else argv)
-
     try:
+        paths = parse_args(sys.argv[1:] if argv is None else argv)
         credentials = load_azure_credentials()
     except AppError as err:
         print(f"Error: {err}", file=sys.stderr)
