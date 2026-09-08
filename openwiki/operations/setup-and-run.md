@@ -454,11 +454,10 @@ uv run ruff format .
 Likely a missing type annotation. Add types to function signatures:
 
 ```python
-def parse_args(argv: list[str]) -> list[Path]:
-    ...
+def parse_args(argv: list[str]) -> list[Path]: ...
 
-def validate_file(path: Path) -> None:
-    ...
+
+def validate_file(path: Path) -> None: ...
 ```
 
 See `src/` files for examples.
