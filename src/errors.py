@@ -21,3 +21,7 @@ class UnsupportedFileTypeError(AppError):
     def __init__(self, path: Path) -> None:
         super().__init__(f"unsupported file extension '{path.suffix}': {path}")
         self.path = path
+
+
+class CredentialError(AppError):
+    """Raised when required Azure Speech credentials are missing or empty."""
