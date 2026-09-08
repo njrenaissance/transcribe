@@ -1,4 +1,6 @@
+import csv
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -116,6 +118,44 @@ def test_main_isolates_per_file_failure_and_still_writes_valid_files(mocker, tmp
     assert (tmp_path / "a.mp3.json").exists()
     assert "missing.mp3" in capsys.readouterr().err
     assert not (tmp_path / "missing.mp3.json").exists()
+
+
+def _write_manifest(path: Path, urls: list[str]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as manifest_file:
+        writer = csv.writer(manifest_file)
+        writer.writerow(["url"])
+        for url in urls:
+            writer.writerow([url])
+
+
+@pytest.mark.unit
+@pytest.mark.usefixtures("valid_credentials_env")
+def test_main_writes_output_files_for_manifest_rows_and_returns_zero(mocker, tmp_path):
+    audio_a = tmp_path / "a.mp3"
+    audio_a.write_bytes(b"fake-audio-bytes")
+    audio_b = tmp_path / "b.wav"
+    audio_b.write_bytes(b"fake-audio-bytes")
+    manifest = tmp_path / "manifest.csv"
+    _write_manifest(manifest, [str(audio_a), str(audio_b)])
+    _mock_response(mocker, _VALID_RESULT)
+
+    exit_code = main(["--manifest", str(manifest)])
+
+    assert exit_code == 0
+    assert (tmp_path / "a.mp3.json").exists()
+    assert (tmp_path / "b.wav.json").exists()
+
+
+@pytest.mark.unit
+def test_main_reports_invalid_manifest_without_calling_azure(mocker, tmp_path, capsys):
+    missing_manifest = tmp_path / "missing.csv"
+    mock_post = mocker.patch("transcribe.transcription.httpx.post")
+
+    exit_code = main(["--manifest", str(missing_manifest)])
+
+    assert exit_code == 1
+    assert "missing.csv" in capsys.readouterr().err
+    mock_post.assert_not_called()
 
 
 @pytest.mark.unit

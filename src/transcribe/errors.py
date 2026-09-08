@@ -57,3 +57,11 @@ class OutputWriteError(AppError):
     def __init__(self, path: Path, reason: str) -> None:
         super().__init__(f"failed to write output file {path}: {reason}")
         self.path = path
+
+
+class ManifestError(AppError):
+    """Raised when a `--manifest` CSV file cannot be read or is malformed."""
+
+    def __init__(self, path: Path, reason: str) -> None:
+        super().__init__(f"invalid manifest {path}: {reason}")
+        self.path = path
