@@ -144,10 +144,11 @@ def test_main_returns_0_on_success():
     exit_code = main(argv=[])  # Needs to be valid; currently only validation happens
     assert exit_code == 0
 
+
 @pytest.mark.unit
 def test_main_prints_error_and_returns_1_on_app_error(capsys):
     exit_code = main(argv=["nonexistent.mp3"])  # File doesn't exist
-    
+
     assert exit_code == 1
     captured = capsys.readouterr()
     assert "Error:" in captured.err
@@ -183,8 +184,7 @@ def azure_credentials_env(monkeypatch):
 2. **Mark with `@pytest.mark.unit` or `@pytest.mark.integration`:**
    ```python
    @pytest.mark.unit
-   def test_my_feature():
-       ...
+   def test_my_feature(): ...
    ```
 
 3. **Use fixtures for isolation:**

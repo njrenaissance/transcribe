@@ -41,11 +41,13 @@ tests/
 def test_parse_args_returns_paths_for_each_argument():
     assert parse_args(["a.mp3", "b.wav"]) == [Path("a.mp3"), Path("b.wav")]
 
+
 @pytest.mark.unit
 def test_validate_file_accepts_supported_extensions(tmp_path, extension):
     audio_file = tmp_path / f"audio{extension}"
     audio_file.touch()
     validate_file(audio_file)  # Should not raise
+
 
 @pytest.mark.unit
 def test_validate_file_raises_when_file_missing(tmp_path):
@@ -111,15 +113,16 @@ def test_load_azure_credentials_raises_naming_only_the_missing_variable(
 def test_main_returns_zero_for_valid_files(tmp_path):
     audio_file = tmp_path / "audio.mp3"
     audio_file.touch()
-    
+
     assert main([str(audio_file)]) == 0
+
 
 @pytest.mark.unit
 def test_main_reports_missing_file(tmp_path, capsys):
     missing = tmp_path / "missing.mp3"
-    
+
     exit_code = main([str(missing)])
-    
+
     assert exit_code == 1
     assert "missing.mp3" in capsys.readouterr().err
 ```
@@ -265,19 +268,16 @@ def test_transcribe_file_constructs_correct_request(mocker):
         "durationMilliseconds": 1000,
         "phrases": [{"offsetMilliseconds": 0, "durationMilliseconds": 1000, "text": "hello", "locale": "en-US"}],
     }
-    
+
     audio_path = Path("audio.mp3")
-    credentials = AzureCredentials(
-        endpoint="https://example.cognitiveservices.azure.com",
-        key="key"
-    )
-    
+    credentials = AzureCredentials(endpoint="https://example.cognitiveservices.azure.com", key="key")
+
     result = transcribe_file(audio_path, credentials, timeout=30.0)
-    
+
     # Verify httpx.post was called with correct args
     mock_post.assert_called_once()
     call_args = mock_post.call_args
-    
+
     assert call_args[1]["url"].startswith("https://example.cognitiveservices.azure.com")
     assert "api-version=2025-10-15" in call_args[1]["url"]
     assert call_args[1]["headers"]["Ocp-Apim-Subscription-Key"] == "key"
@@ -343,7 +343,7 @@ def test_main_transcribes_multiple_files_and_writes_json(mocker, tmp_path):
     audio2 = tmp_path / "audio2.wav"
     audio1.touch()
     audio2.touch()
-    
+
     # Mock Azure responses
     mock_post = mocker.patch("httpx.post")
     mock_post.return_value.status_code = 200
@@ -351,16 +351,19 @@ def test_main_transcribes_multiple_files_and_writes_json(mocker, tmp_path):
         "durationMilliseconds": 1000,
         "phrases": [{"offsetMilliseconds": 0, "durationMilliseconds": 1000, "text": "test", "locale": "en-US"}],
     }
-    
+
     # Set credentials
-    mocker.patch.dict("os.environ", {
-        "AZURE_SPEECH_ENDPOINT": "https://example.com",
-        "AZURE_SPEECH_KEY": "key",
-    })
-    
+    mocker.patch.dict(
+        "os.environ",
+        {
+            "AZURE_SPEECH_ENDPOINT": "https://example.com",
+            "AZURE_SPEECH_KEY": "key",
+        },
+    )
+
     # Run
     exit_code = main([str(audio1), str(audio2)])
-    
+
     # Verify
     assert exit_code == 0
     assert (tmp_path / "audio1.mp3.json").exists()
