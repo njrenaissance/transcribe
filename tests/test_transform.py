@@ -1,9 +1,21 @@
 import json
+from pathlib import Path
 
 import pytest
 
-from transcribe.errors import EmptyTranscriptionResultError, OutputWriteError
-from transcribe.transform import transform_result, write_transcript_json
+from transcribe.errors import EmptyTranscriptionResultError, MissingFileError, OutputWriteError
+from transcribe.transform import (
+    build_error_output,
+    has_existing_transcript,
+    output_path,
+    transform_result,
+    write_transcript_json,
+)
+
+_VALID_RESULT = {
+    "durationMilliseconds": 2500,
+    "phrases": [{"offsetMilliseconds": 0, "durationMilliseconds": 2500, "text": "Hello world", "locale": "en-US"}],
+}
 
 
 @pytest.mark.unit
@@ -126,3 +138,59 @@ def test_write_transcript_json_leaves_no_partial_file_on_replace_failure(mocker,
 
     assert not (tmp_path / "audio.mp3.json").exists()
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+@pytest.mark.unit
+def test_write_transcript_json_accepts_error_output(tmp_path):
+    source_path = tmp_path / "audio.mp3"
+    output = build_error_output(source_path, MissingFileError(source_path))
+
+    destination = write_transcript_json(output, source_path)
+
+    assert json.loads(destination.read_text(encoding="utf-8")) == {
+        "source_file": "audio.mp3",
+        "error": f"file not found: {source_path}",
+    }
+
+
+@pytest.mark.unit
+def test_build_error_output_uses_source_file_name_and_error_message(tmp_path):
+    source_path = tmp_path / "audio.mp3"
+
+    output = build_error_output(source_path, MissingFileError(source_path))
+
+    assert output == {"source_file": "audio.mp3", "error": f"file not found: {source_path}"}
+
+
+@pytest.mark.unit
+def test_output_path_returns_sibling_json_path():
+    assert output_path(Path("dir/audio.mp3")) == Path("dir/audio.mp3.json")
+
+
+@pytest.mark.unit
+def test_has_existing_transcript_false_when_no_output_file(tmp_path):
+    assert has_existing_transcript(tmp_path / "audio.mp3") is False
+
+
+@pytest.mark.unit
+def test_has_existing_transcript_true_for_successful_output(tmp_path):
+    source_path = tmp_path / "audio.mp3"
+    write_transcript_json(transform_result(_VALID_RESULT, source_path), source_path)
+
+    assert has_existing_transcript(source_path) is True
+
+
+@pytest.mark.unit
+def test_has_existing_transcript_false_for_error_output(tmp_path):
+    source_path = tmp_path / "audio.mp3"
+    write_transcript_json(build_error_output(source_path, MissingFileError(source_path)), source_path)
+
+    assert has_existing_transcript(source_path) is False
+
+
+@pytest.mark.unit
+def test_has_existing_transcript_false_for_corrupt_output_file(tmp_path):
+    source_path = tmp_path / "audio.mp3"
+    output_path(source_path).write_text("not valid json", encoding="utf-8")
+
+    assert has_existing_transcript(source_path) is False

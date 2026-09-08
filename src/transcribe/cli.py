@@ -7,11 +7,19 @@ list, a nonexistent file, or an unsupported file extension.
 import argparse
 import csv
 from pathlib import Path
+from typing import NamedTuple
 
 from .errors import ManifestError, MissingFileError, UnsupportedFileTypeError
 
 SUPPORTED_EXTENSIONS = {".mp3", ".wav"}
 _MANIFEST_URL_COLUMN = "url"
+
+
+class ParsedArgs(NamedTuple):
+    """Resolved input file paths and run options parsed from the CLI arguments."""
+
+    paths: list[Path]
+    clobber: bool
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -23,11 +31,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=Path,
         help=f"CSV file with a '{_MANIFEST_URL_COLUMN}' column of audio file paths",
     )
+    parser.add_argument(
+        "--clobber",
+        action="store_true",
+        help="reprocess files that already have a FILE.json transcript instead of skipping them",
+    )
     return parser
 
 
-def parse_args(argv: list[str]) -> list[Path]:
-    """Parse CLI arguments into a list of input file paths.
+def parse_args(argv: list[str]) -> ParsedArgs:
+    """Parse CLI arguments into resolved input file paths and run options.
 
     Exits with code 2 and a usage message on stderr (via argparse) when
     neither file arguments nor `--manifest` are given.
@@ -43,7 +56,7 @@ def parse_args(argv: list[str]) -> list[Path]:
     paths = [Path(file) for file in args.files]
     if args.manifest is not None:
         paths.extend(read_manifest(args.manifest))
-    return paths
+    return ParsedArgs(paths=paths, clobber=args.clobber)
 
 
 def read_manifest(path: Path) -> list[Path]:

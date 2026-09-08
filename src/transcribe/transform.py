@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, TypedDict
 
-from .errors import EmptyTranscriptionResultError, OutputWriteError
+from .errors import AppError, EmptyTranscriptionResultError, OutputWriteError
 from .transcription import DEFAULT_LOCALE
 
 
@@ -19,12 +19,24 @@ class Segment(TypedDict):
 
 
 class TranscriptOutput(TypedDict):
-    """The output schema written to `FILE.json`."""
+    """The output schema written to `FILE.json` on success."""
 
     source_file: str
     language: str
     duration_seconds: float
     segments: list[Segment]
+
+
+class ErrorOutput(TypedDict):
+    """The output schema written to `FILE.json` when processing `source_file` fails.
+
+    Written instead of `TranscriptOutput` so every input file ends up with
+    exactly one output file, auditable from the output folder alone even when
+    the run's stderr wasn't captured (see issue #18).
+    """
+
+    source_file: str
+    error: str
 
 
 def transform_result(
@@ -66,7 +78,35 @@ def transform_result(
     )
 
 
-def write_transcript_json(output: TranscriptOutput, source_path: Path) -> Path:
+def build_error_output(source_path: Path, error: AppError) -> ErrorOutput:
+    """Build the error-echoing output written for `source_path` when processing it fails."""
+    return ErrorOutput(source_file=source_path.name, error=str(error))
+
+
+def output_path(source_path: Path) -> Path:
+    """The sibling `FILE.json` path that `source_path`'s output is written to."""
+    return source_path.with_name(source_path.name + ".json")
+
+
+def has_existing_transcript(source_path: Path) -> bool:
+    """Whether `source_path` already has a successful transcript on disk.
+
+    Used to resume a run without re-transcribing files that already
+    succeeded. An error-echoing output (or an unreadable/corrupt file) does
+    not count as done, so a prior failure is retried on the next run.
+    """
+    destination = output_path(source_path)
+    if not destination.exists():
+        return False
+    try:
+        with destination.open(encoding="utf-8") as existing_file:
+            existing_output = json.load(existing_file)
+    except (OSError, json.JSONDecodeError):
+        return False
+    return "error" not in existing_output
+
+
+def write_transcript_json(output: TranscriptOutput | ErrorOutput, source_path: Path) -> Path:
     """Atomically write `output` to `FILE.json`, a sibling of `source_path`.
 
     Writes to a temp file in the same directory and renames it into place with
@@ -75,7 +115,7 @@ def write_transcript_json(output: TranscriptOutput, source_path: Path) -> Path:
     Raises:
         OutputWriteError: if the write or the atomic rename fails.
     """
-    destination = source_path.with_name(source_path.name + ".json")
+    destination = output_path(source_path)
     fd, tmp_name = tempfile.mkstemp(dir=destination.parent, prefix=f".{destination.name}.", suffix=".tmp")
     tmp_path = Path(tmp_name)
     try:

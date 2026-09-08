@@ -84,7 +84,13 @@ regenerate-before-commit rule agents follow.
 
 ```bash
 uv run transcribe audio.mp3 [audio2.wav ...]
+uv run transcribe --manifest data/manifest.csv
 ```
+
+A file already holding a successful `FILE.json` transcript is skipped on a
+later run (no Azure call) — safe to re-run over a large manifest after an
+interruption. Pass `--clobber` to reprocess every file regardless of any
+existing output.
 
 ## Test
 

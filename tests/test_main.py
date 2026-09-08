@@ -86,7 +86,11 @@ def test_main_reports_missing_file(tmp_path, capsys):
 
     assert exit_code == 1
     assert "missing.mp3" in capsys.readouterr().err
-    assert not (tmp_path / "missing.mp3.json").exists()
+    output_file = tmp_path / "missing.mp3.json"
+    assert output_file.exists()
+    output = json.loads(output_file.read_text(encoding="utf-8"))
+    assert output["source_file"] == "missing.mp3"
+    assert "missing.mp3" in output["error"]
 
 
 @pytest.mark.unit
@@ -101,7 +105,10 @@ def test_main_reports_unsupported_extension(tmp_path, capsys):
     assert exit_code == 1
     assert "unsupported" in stderr.lower()
     assert ".txt" in stderr
-    assert not (tmp_path / "notes.txt.json").exists()
+    output_file = tmp_path / "notes.txt.json"
+    assert output_file.exists()
+    output = json.loads(output_file.read_text(encoding="utf-8"))
+    assert "unsupported" in output["error"].lower()
 
 
 @pytest.mark.unit
@@ -117,7 +124,7 @@ def test_main_isolates_per_file_failure_and_still_writes_valid_files(mocker, tmp
     assert exit_code == 1
     assert (tmp_path / "a.mp3.json").exists()
     assert "missing.mp3" in capsys.readouterr().err
-    assert not (tmp_path / "missing.mp3.json").exists()
+    assert (tmp_path / "missing.mp3.json").exists()
 
 
 def _write_manifest(path: Path, urls: list[str]) -> None:
@@ -183,6 +190,8 @@ def test_main_reports_missing_credentials_without_calling_azure(mocker, tmp_path
     for var in unset_vars:
         assert var in stderr
     mock_post.assert_not_called()
+    # Missing credentials abort the whole run before the per-file loop starts,
+    # so there is no single file to attach an error-echoing output to.
     assert not (tmp_path / "audio.mp3.json").exists()
 
 
@@ -197,7 +206,9 @@ def test_main_reports_transcription_failure_on_non_2xx_response(mocker, tmp_path
 
     assert exit_code == 1
     assert "401" in capsys.readouterr().err
-    assert not (tmp_path / "audio.mp3.json").exists()
+    output_file = tmp_path / "audio.mp3.json"
+    assert output_file.exists()
+    assert "401" in json.loads(output_file.read_text(encoding="utf-8"))["error"]
 
 
 @pytest.mark.unit
@@ -211,7 +222,7 @@ def test_main_reports_transcription_failure_on_network_error(mocker, tmp_path, c
 
     assert exit_code == 1
     assert capsys.readouterr().err
-    assert not (tmp_path / "audio.mp3.json").exists()
+    assert (tmp_path / "audio.mp3.json").exists()
 
 
 @pytest.mark.unit
@@ -225,7 +236,9 @@ def test_main_reports_transcription_timeout(mocker, tmp_path, capsys):
 
     assert exit_code == 1
     assert "audio.mp3" in capsys.readouterr().err
-    assert not (tmp_path / "audio.mp3.json").exists()
+    output_file = tmp_path / "audio.mp3.json"
+    assert output_file.exists()
+    assert "audio.mp3" in json.loads(output_file.read_text(encoding="utf-8"))["error"]
 
 
 @pytest.mark.unit
@@ -239,4 +252,56 @@ def test_main_reports_empty_transcript(mocker, tmp_path, capsys):
 
     assert exit_code == 1
     assert capsys.readouterr().err
-    assert not (tmp_path / "audio.mp3.json").exists()
+    output_file = tmp_path / "audio.mp3.json"
+    assert output_file.exists()
+    assert "no usable transcript" in json.loads(output_file.read_text(encoding="utf-8"))["error"]
+
+
+@pytest.mark.unit
+@pytest.mark.usefixtures("valid_credentials_env")
+def test_main_skips_file_with_existing_successful_transcript(mocker, tmp_path):
+    audio_file = tmp_path / "audio.mp3"
+    audio_file.write_bytes(b"fake-audio-bytes")
+    mock_post = _mock_response(mocker, _VALID_RESULT)
+    assert main([str(audio_file)]) == 0
+    mock_post.reset_mock()
+
+    exit_code = main([str(audio_file)])
+
+    assert exit_code == 0
+    mock_post.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.usefixtures("valid_credentials_env")
+def test_main_clobber_reprocesses_file_with_existing_successful_transcript(mocker, tmp_path):
+    audio_file = tmp_path / "audio.mp3"
+    audio_file.write_bytes(b"fake-audio-bytes")
+    mock_post = _mock_response(mocker, _VALID_RESULT)
+    assert main([str(audio_file)]) == 0
+    mock_post.reset_mock()
+
+    exit_code = main([str(audio_file), "--clobber"])
+
+    assert exit_code == 0
+    mock_post.assert_called_once()
+
+
+@pytest.mark.unit
+@pytest.mark.usefixtures("valid_credentials_env")
+def test_main_retries_file_with_existing_error_output_without_clobber(mocker, tmp_path):
+    audio_file = tmp_path / "audio.mp3"
+    audio_file.write_bytes(b"fake-audio-bytes")
+    mock_post = _mock_response(mocker, {"durationMilliseconds": 0, "phrases": []})
+    assert main([str(audio_file)]) == 1
+    mock_post.reset_mock()
+    mock_post.return_value = httpx.Response(
+        200, json=_VALID_RESULT, request=httpx.Request("POST", "https://example.com")
+    )
+
+    exit_code = main([str(audio_file)])
+
+    assert exit_code == 0
+    mock_post.assert_called_once()
+    output = json.loads((tmp_path / "audio.mp3.json").read_text(encoding="utf-8"))
+    assert output["segments"] == [{"start": 0.0, "end": 2.5, "text": "Hello world"}]
