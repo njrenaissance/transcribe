@@ -25,3 +25,19 @@ class UnsupportedFileTypeError(AppError):
 
 class CredentialError(AppError):
     """Raised when required Azure Speech credentials are missing or empty."""
+
+
+class TranscriptionError(AppError):
+    """Raised when a fast-transcription request fails (auth, non-2xx, or network error)."""
+
+    def __init__(self, path: Path, reason: str) -> None:
+        super().__init__(f"fast-transcription request failed for {path}: {reason}")
+        self.path = path
+
+
+class TranscriptionTimeoutError(AppError):
+    """Raised when a fast-transcription request exceeds the configured timeout."""
+
+    def __init__(self, path: Path, timeout: float) -> None:
+        super().__init__(f"fast-transcription request for {path} timed out after {timeout}s")
+        self.path = path
