@@ -19,7 +19,10 @@ def _write_manifest(path: Path, urls: list[str], column: str = "url") -> None:
 
 @pytest.mark.unit
 def test_parse_args_returns_paths_for_each_argument():
-    assert parse_args(["a.mp3", "b.wav"]) == [Path("a.mp3"), Path("b.wav")]
+    parsed = parse_args(["a.mp3", "b.wav"])
+
+    assert parsed.paths == [Path("a.mp3"), Path("b.wav")]
+    assert parsed.clobber is False
 
 
 @pytest.mark.unit
@@ -36,7 +39,7 @@ def test_parse_args_reads_paths_from_manifest(tmp_path):
     manifest = tmp_path / "manifest.csv"
     _write_manifest(manifest, ["a.mp3", "b.wav"])
 
-    assert parse_args(["--manifest", str(manifest)]) == [Path("a.mp3"), Path("b.wav")]
+    assert parse_args(["--manifest", str(manifest)]).paths == [Path("a.mp3"), Path("b.wav")]
 
 
 @pytest.mark.unit
@@ -44,7 +47,12 @@ def test_parse_args_combines_positional_files_and_manifest(tmp_path):
     manifest = tmp_path / "manifest.csv"
     _write_manifest(manifest, ["b.wav"])
 
-    assert parse_args(["a.mp3", "--manifest", str(manifest)]) == [Path("a.mp3"), Path("b.wav")]
+    assert parse_args(["a.mp3", "--manifest", str(manifest)]).paths == [Path("a.mp3"), Path("b.wav")]
+
+
+@pytest.mark.unit
+def test_parse_args_sets_clobber_when_flag_given():
+    assert parse_args(["a.mp3", "--clobber"]).clobber is True
 
 
 @pytest.mark.unit
