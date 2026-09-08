@@ -54,7 +54,7 @@ The outputs `speech_endpoint` and `speech_primary_key` feed the env vars above. 
 
 ### Run, test, lint
 ```bash
-uv run python src/main.py audio.mp3          # Run (once issue #8-11 merge)
+uv run transcribe audio.mp3                   # Run the CLI
 uv run pytest                                 # All tests
 make check                                    # Lint + type-check + tests
 ```
@@ -74,14 +74,19 @@ make check                                    # Lint + type-check + tests
 
 ```
 ├── src/
-│   ├── main.py          # CLI entrypoint
-│   ├── cli.py           # Argument parsing, file validation
-│   ├── credentials.py    # Azure credential loading
-│   └── errors.py        # Exception hierarchy
+│   └── transcribe/
+│       ├── main.py          # CLI entrypoint
+│       ├── cli.py           # Argument parsing, file validation
+│       ├── credentials.py    # Azure credential loading
+│       ├── errors.py        # Exception hierarchy
+│       ├── transcription.py  # Azure transcription calls
+│       └── transform.py      # Result transformation & output
 ├── tests/
-│   ├── test_cli.py      # Unit: parsing, validation
-│   ├── test_credentials.py  # Unit: env var loading
-│   └── test_main.py     # Unit: integration (partial)
+│   ├── test_cli.py          # Unit: parsing, validation
+│   ├── test_credentials.py   # Unit: env var loading
+│   ├── test_transcription.py # Unit: Azure calls
+│   ├── test_transform.py     # Unit: transformation & output
+│   └── test_main.py          # Integration tests
 ├── spec/
 │   ├── spec.md          # Full specification
 │   ├── build-order.md   # Issue sequencing
@@ -104,9 +109,12 @@ make check                                    # Lint + type-check + tests
 |------|------|-----|
 | `/spec/spec.md` | Specification | Complete input/output contracts, 10 done criteria, Phase 2 plan |
 | `/spec/adr/0003-fast-transcription-for-local-files.md` | Design decision | Why fast (sync) for local, batch deferred; rationale for two-mode design |
-| `/src/cli.py` | Validation | Argument parsing; checks file exists, extension supported (.mp3, .wav) |
-| `/src/credentials.py` | Credential handling | Loads, validates `AZURE_SPEECH_*` env vars; raises if missing |
-| `/src/errors.py` | Exceptions | Hierarchy: AppError, MissingFileError, UnsupportedFileTypeError, CredentialError, TranscriptionError, TranscriptionTimeoutError |
+| `/src/transcribe/main.py` | Entrypoint | CLI orchestration: parse → validate → transcribe → transform → write |
+| `/src/transcribe/cli.py` | Validation | Argument parsing; checks file exists, extension supported (.mp3, .wav) |
+| `/src/transcribe/transcription.py` | Transcription | HTTP POST to Azure fast endpoint; handles responses and errors |
+| `/src/transcribe/transform.py` | Output | Transforms Azure JSON into output schema; atomically writes FILE.json |
+| `/src/transcribe/credentials.py` | Credential handling | Loads, validates `AZURE_SPEECH_*` env vars; raises if missing |
+| `/src/transcribe/errors.py` | Exceptions | Hierarchy: AppError, MissingFileError, CredentialError, TranscriptionError, EmptyTranscriptionResultError, OutputWriteError |
 | `/infra/main.tf` | Infrastructure | Terraform: provisions Azure Cognitive Services Speech resource |
 | `/.github/workflows/ci.yml` | CI gate | Orchestrates lint → type-check → unit tests → integration tests |
 | `/CLAUDE.md` | Agent brief | Project profile, enabled/disabled features, standards imports |
@@ -116,11 +124,9 @@ make check                                    # Lint + type-check + tests
 ### ✅ Complete (Phase 1)
 - **Issue #6**: CLI argument validation (file existence, extension)
 - **Issue #7**: Azure credential validation (env var loading)
-
-### 🚧 In Progress (Phase 1)
-- **Issue #8**: Fast-transcription request (POST file to Azure endpoint) — *not yet merged*
-- **Issue #10**: Output schema transformation and JSON file write — *depends on #8*
-- **Issue #11**: End-to-end orchestration and per-file error handling — *depends on #8, #10*
+- **Issue #8**: Fast-transcription request (POST file to Azure endpoint)
+- **Issue #10**: Output schema transformation and JSON file write
+- **Issue #11**: End-to-end orchestration and per-file error handling
 
 ### 📋 Deferred (Phase 2)
 - **Issue #9**: Batch polling (not for fast-transcription path)

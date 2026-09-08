@@ -41,3 +41,19 @@ class TranscriptionTimeoutError(AppError):
     def __init__(self, path: Path, timeout: float) -> None:
         super().__init__(f"fast-transcription request for {path} timed out after {timeout}s")
         self.path = path
+
+
+class EmptyTranscriptionResultError(AppError):
+    """Raised when a fast-transcription result contains no phrases (no usable transcript)."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(f"no usable transcript for {path}: transcription result contained no phrases")
+        self.path = path
+
+
+class OutputWriteError(AppError):
+    """Raised when writing the transcript output JSON file fails."""
+
+    def __init__(self, path: Path, reason: str) -> None:
+        super().__init__(f"failed to write output file {path}: {reason}")
+        self.path = path

@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from cli import parse_args, validate_file, validate_files
-from errors import MissingFileError, UnsupportedFileTypeError
+from transcribe.cli import parse_args, validate_file
+from transcribe.errors import MissingFileError, UnsupportedFileTypeError
 
 EXIT_CODE_USAGE_ERROR = 2
 
@@ -46,13 +46,3 @@ def test_validate_file_raises_when_extension_unsupported(tmp_path):
 
     with pytest.raises(UnsupportedFileTypeError, match="unsupported"):
         validate_file(notes)
-
-
-@pytest.mark.unit
-def test_validate_files_stops_at_first_invalid_file(tmp_path):
-    valid = tmp_path / "a.mp3"
-    valid.touch()
-    missing = tmp_path / "missing.wav"
-
-    with pytest.raises(MissingFileError):
-        validate_files([valid, missing])

@@ -99,30 +99,57 @@ make template-check
 
 ### Running the CLI Locally
 
-**Note:** Currently (as of issues #6–#7), the CLI only validates files; actual transcription is awaiting issue #8.
+The `transcribe` CLI is now fully functional (Phase 1 complete): validates files, transcribes via Azure, transforms output, and writes JSON.
 
 ```bash
-# Set environment variables (required by credential validation)
+# Set environment variables (required for Azure authentication)
 export AZURE_SPEECH_ENDPOINT="https://your-region.cognitiveservices.azure.com"
 export AZURE_SPEECH_KEY="your-key"
 
-# Run (currently validates files only, exits 0 if OK)
-uv run python src/main.py sample.mp3
+# Run the CLI
+uv run transcribe sample.mp3
+# Outputs: sample.mp3.json (in the same directory as input)
+
+# Run multiple files
+uv run transcribe audio1.mp3 audio2.wav interview.mp3
 
 # Example: file does not exist
-$ uv run python src/main.py missing.mp3
+$ uv run transcribe missing.mp3
 Error: file not found: missing.mp3
 # Exit code: 1
 
 # Example: unsupported extension
-$ uv run python src/main.py notes.txt
-Error: unsupported file extension '.txt': notes.txt
+$ uv run transcribe notes.txt
+Error: unsupported file type: .txt (supported: .mp3, .wav)
 # Exit code: 1
 
 # Example: missing credentials
-$ uv run python src/main.py sample.mp3
-Error: Missing required environment variable(s): AZURE_SPEECH_ENDPOINT
+$ uv run transcribe sample.mp3
+Error: Missing required environment variable(s): AZURE_SPEECH_KEY
 # Exit code: 1
+
+# Example: Azure transcription error (invalid key)
+$ uv run transcribe sample.mp3
+Error: HTTP 401 when calling Azure for sample.mp3
+# Exit code: 1
+
+# Example: multiple files, some fail
+$ uv run transcribe good.mp3 missing.wav better.mp3
+Error: file not found: missing.wav
+# Processes good.mp3 and better.mp3 successfully, exits with 1
+```
+
+**Output file format:**
+```json
+{
+  "source_file": "audio.mp3",
+  "language": "en-US",
+  "duration_seconds": 45.67,
+  "segments": [
+    {"start": 0.0, "end": 2.5, "text": "Hello world"},
+    {"start": 2.5, "end": 7.2, "text": "How are you?"}
+  ]
+}
 ```
 
 ## Testing
@@ -131,10 +158,12 @@ Error: Missing required environment variable(s): AZURE_SPEECH_ENDPOINT
 
 ```
 tests/
-├── conftest.py          # Shared pytest configuration (e.g., log-level setup)
-├── test_cli.py          # CLI argument parsing and file validation
-├── test_credentials.py  # Azure credential loading
-└── test_main.py         # Main entrypoint (integration placeholder)
+├── conftest.py           # Shared pytest configuration (e.g., log-level setup)
+├── test_cli.py           # CLI argument parsing and file validation
+├── test_credentials.py   # Azure credential loading
+├── test_transcription.py # Azure transcription HTTP calls
+├── test_transform.py     # Result transformation and JSON output
+└── test_main.py          # Main entrypoint integration tests
 ```
 
 ### Test Markers

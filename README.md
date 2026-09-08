@@ -7,9 +7,14 @@ A minimal Python project, managed with [uv](https://docs.astral.sh/uv/).
 
 ```bash
 ├── src/
-│   └── main.py       # greet()
+│   └── transcribe/
+│       ├── cli.py           # argument parsing, input-file validation
+│       ├── credentials.py   # Azure Speech credential loading
+│       ├── transcription.py # fast (synchronous) transcription HTTP call
+│       ├── transform.py     # result -> output schema, write FILE.json
+│       ├── errors.py        # exception hierarchy
+│       └── main.py          # CLI entrypoint / orchestration
 ├── tests/
-│   └── test_main.py  # test for greet()
 └── pyproject.toml
 ```
 
@@ -78,7 +83,7 @@ regenerate-before-commit rule agents follow.
 ## Run
 
 ```bash
-uv run python src/main.py
+uv run transcribe audio.mp3 [audio2.wav ...]
 ```
 
 ## Test
