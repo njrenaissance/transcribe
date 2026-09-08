@@ -1,232 +1,288 @@
-# Architecture Overview
+# Architecture & Workflows
 
-`transcribe` is a lightweight CLI for fast transcription of local audio files using Azure AI Speech. The design prioritizes simplicity for Phase 1 (local files via synchronous transcription) and defers complexity (Phase 2: blob-staged batch) until needed.
+## System overview
 
-## Core Design
-
-### Phase 1: Local Files → Fast Transcription (Current)
+**transcribe** is a thin CLI wrapper around Azure AI Speech's fast (synchronous) transcription endpoint. The design prioritizes simplicity and early validation: bad inputs are rejected before any network call is made.
 
 ```
-CLI Input
-  ↓ (e.g., "transcribe audio.mp3")
-Argument Parser (cli.py)
-  ↓ (parse, reject if no files)
-File Validator (cli.py)
-  ↓ (check exists, check extension in {.mp3, .wav})
-Credential Loader (credentials.py)
-  ↓ (read AZURE_SPEECH_ENDPOINT, AZURE_SPEECH_KEY from env)
-Azure Fast-Transcription Request
-  ↓ (POST to /speechtotext/transcriptions:transcribe)
-Response Transform
-  ↓ (map Azure result → output schema)
-Write JSON Output (audio.mp3.json)
-  ↓
-Exit (code 0 on success, 1 on any error)
+User → CLI args
+   ↓
+[Parse & validate arguments]  (cli.py)
+   ↓
+[Load credentials]  (credentials.py)
+   ↓
+[POST to Azure fast-transcription endpoint]  (azure call via httpx)
+   ↓
+[Transform result → output schema]
+   ↓
+[Write FILE.json]
+   ↓
+User ← exit code + stderr errors
 ```
 
-**Key insight:** Validation happens *before* any Azure call. If input files or credentials are invalid, the CLI fails locally and exits without touching Azure (cheaper, faster feedback).
+## Layered architecture
 
-### Phase 2: Blob-Staged Batch (Deferred)
+### 1. CLI Layer (`cli.py`)
 
-Planned for larger/bulk audio exceeding the fast-transcription cap (< 5 h / < 500 MB per file). Will add:
-- Azure Blob Storage upload (Cold tier, long-term retention)
-- Batch submit with polling loop
-- Transcript download from results
-
-See `/spec/adr/0003-fast-transcription-for-local-files.md` for the rationale: fast transcription is simpler and cheaper for the current small-file workload.
-
-## Components
-
-### CLI Module (`src/cli.py`)
-
-**Responsibilities:**
-- Parse command-line arguments (`transcribe file1.mp3 file2.wav`)
-- Validate each file (exists on disk, extension in `.mp3` or `.wav`)
-- Raise `MissingFileError` or `UnsupportedFileTypeError` if validation fails
+**Purpose:** Parse CLI arguments and validate input files before any system call.
 
 **Key functions:**
-- `build_arg_parser()` — Creates ArgumentParser with "files" positional arg (nargs="+")
-- `parse_args(argv)` — Parses and returns list of Path objects; exits with code 2 if no args
-- `validate_file(path)` — Checks existence and extension
-- `validate_files(paths)` — Validates each path in sequence; stops at first error
+- `build_arg_parser()` → `argparse.ArgumentParser`
+  - Requires one or more `files` positional arguments
+  - Exits with code 2 and usage message if none given (automatic via argparse)
 
-**Design pattern:** Fail fast and locally. No I/O beyond stat(); no external calls.
+- `parse_args(argv)` → `list[Path]`
+  - Converts CLI argument strings to `Path` objects
+  - Lets argparse handle exit-on-no-args
 
-### Credentials Module (`src/credentials.py`)
+- `validate_file(path)` → `None` or raises
+  - Checks file exists on disk
+  - Checks extension is in `SUPPORTED_EXTENSIONS = {".mp3", ".wav"}`
+  - Raises `MissingFileError` or `UnsupportedFileTypeError` (domain exceptions)
 
-**Responsibilities:**
-- Read `AZURE_SPEECH_ENDPOINT` and `AZURE_SPEECH_KEY` from environment
-- Validate both are set and non-empty
-- Return frozen dataclass `AzureCredentials`
+- `validate_files(paths)` → `None` or raises
+  - Validates each path in order; stops at first invalid file
+  - Aggregate validation across multiple inputs
 
-**Key functions:**
-- `load_azure_credentials()` — Reads env vars; raises `CredentialError` if either is missing, naming specifically which one(s)
+**Why here:** Validation before credentials or Azure calls means:
+- Fast feedback on bad input
+- No wasted API calls
+- Clear error messages before any auth is attempted
 
-**Design pattern:** Environment variables only (no file-based config, no pydantic-settings). Raises early with clear error message.
+### 2. Credentials Layer (`credentials.py`)
 
-### Error Hierarchy (`src/errors.py`)
+**Purpose:** Load and validate Azure Speech credentials from environment variables.
 
-All exceptions inherit from `AppError` (root), enabling uniform error handling in `main.py`.
+**Key structure:**
+```python
+@dataclass(frozen=True)
+class AzureCredentials:
+    endpoint: str
+    key: str
+```
 
+**Key function:**
+- `load_azure_credentials()` → `AzureCredentials`
+  - Reads `AZURE_SPEECH_ENDPOINT` and `AZURE_SPEECH_KEY` from `os.environ`
+  - Raises `CredentialError` if either is unset or empty
+  - Error message names every missing variable
+  - No caching; each call re-reads from environment
+
+**Why here:** Credentials are a security boundary and resource dependency. Loading explicitly before transcription makes:
+- Credential errors discoverable early
+- The credential contract (env var names, requirements) visible and testable
+- Thread-safe retrieval (no module-level state)
+
+### 3. Error Handling (`errors.py`)
+
+**Purpose:** Domain-specific exception hierarchy for expected failure modes.
+
+**Exception tree:**
 ```
 AppError (base)
-├── MissingFileError(path)      # File not found on disk
-├── UnsupportedFileTypeError(path)  # Unsupported file extension
-├── CredentialError(msg)        # Missing/empty env vars
-├── TranscriptionError(path, reason)  # Transcription request failed (auth, non-2xx, network)
-└── TranscriptionTimeoutError(path, timeout)  # Request exceeded timeout
+├── MissingFileError(path: Path)
+├── UnsupportedFileTypeError(path: Path)
+├── CredentialError
+├── TranscriptionError(path: Path, reason: str)
+└── TranscriptionTimeoutError(path: Path, timeout: float)
 ```
 
-Each includes the context (path, reason) for clear error messages to stderr.
+**Design rationale:**
+- All domain exceptions inherit from `AppError`
+- Specific subclasses for each failure mode (validation, credentials, transcription)
+- Each exception carries context: file path, timeout value, reason
+- Caught once at the CLI entrypoint, converted to exit code + stderr message
 
-### Main Entrypoint (`src/main.py`)
+**Why typed exceptions matter:**
+- Allows the main entrypoint to catch `AppError` and convert to exit code 1
+- Lets argparse's own `SystemExit` (exit code 2, usage) pass through unchanged
+- Makes each error mode distinguishable in tests and caller code
+- Supports per-file error collection in Phase 1 orchestration ([issue #11](https://github.com/njrenaissance/transcribe/issues/11))
 
-**Responsibilities:**
-- Call `parse_args()` to get file paths
-- Call `validate_files()` to check all files exist and have valid extensions
-- Call `load_azure_credentials()` to get credential context (not yet used; awaits issue #8)
-- Catch `AppError`, print to stderr, return exit code 1 (or 2 for usage errors)
-- Return 0 on success
+### 4. Main Entrypoint (`main.py`)
 
-**Current flow (Phase 1 incomplete):**
+**Purpose:** Orchestrate the pipeline and convert exceptions to exit codes.
+
 ```python
-try:
-    paths = parse_args(sys.argv[1:])
-    validate_files(paths)
-    # TODO: load credentials
-    # TODO: for each path, call Azure and transform result
-except AppError as err:
-    print(f"Error: {err}", file=sys.stderr)
-    return 1
-return 0
+def main(argv: list[str] | None = None) -> int:
+    try:
+        paths = parse_args(sys.argv[1:] if argv is None else argv)
+        validate_files(paths)
+    except AppError as err:
+        print(f"Error: {err}", file=sys.stderr)
+        return 1
+    return 0
 ```
 
-Issues #8, #10, #11 will fill the TODO sections.
+**Current behavior (Phase 1):**
+- Parses and validates all files
+- Stops at first error
+- Reports error to stderr; exits 1
+- Does not yet transcribe files (issues #8 and #10 will add that)
 
-## Data Contracts
+**Future behavior (Phase 1 completion, issue #11):**
+- Process each file individually
+- Collect per-file errors
+- Transcribe successful files
+- Report all errors at the end
+- Exit 0 only if all files succeeded; 1 if any failed
 
-### Input
+**Exception handling:**
+- Catches `AppError` (domain exceptions) → exit 1
+- Lets `SystemExit` (argparse usage) → exit 2
+- Lets other exceptions propagate (programmer errors during development)
+
+**Why this design:**
+- Single point of translation from domain exception to exit code
+- Separates "is this error expected?" (exception class) from "what's the response?" (caught here)
+- Keeps business logic in CLI/credentials/validation layers; exit-code translation at the boundary
+
+## Data flow: File validation
 
 ```
-CLI arguments: str (file paths)
-→ parse_args() → list[Path]
-→ validate_files() → ok or raise MissingFileError/UnsupportedFileTypeError
+User: transcribe a.mp3 missing.wav
+   ↓
+parse_args() → [Path("a.mp3"), Path("missing.wav")]
+   ↓
+validate_files([Path("a.mp3"), Path("missing.wav")])
+   ├→ validate_file(Path("a.mp3"))
+   │   ├→ path.exists() ✓
+   │   ├→ path.suffix.lower() in {".mp3", ".wav"} ✓
+   │   └→ OK
+   ├→ validate_file(Path("missing.wav"))
+   │   ├→ path.exists() ✗
+   │   └→ raise MissingFileError(Path("missing.wav"))
+   ↓
+main() catches MissingFileError
+   ↓
+print("Error: file not found: missing.wav", file=sys.stderr)
+return 1
+   ↓
+User ← exit code 1, stderr has error message
 ```
 
-**Validation rules:**
-- At least one file path (argparse nargs="+" enforces; exit code 2 if missing)
-- Each file must exist on disk
-- Each file extension must be in `{".mp3", ".wav"}` (case-insensitive)
-
-### Credentials
+## Data flow: Credentials validation
 
 ```
-Environment variables:
-  AZURE_SPEECH_ENDPOINT = "https://region.cognitiveservices.azure.com"
-  AZURE_SPEECH_KEY = "key-string"
-
-→ load_azure_credentials() → AzureCredentials(endpoint, key)
+User: transcribe audio.mp3
+      (AZURE_SPEECH_KEY unset)
+   ↓
+parse_args() + validate_files() ✓
+   ↓
+[Issue #8 will call load_azure_credentials()]
+   ↓
+load_azure_credentials()
+   ├→ endpoint = os.environ.get("AZURE_SPEECH_ENDPOINT") → "https://..."
+   ├→ key = os.environ.get("AZURE_SPEECH_KEY") → ""
+   ├→ missing = ["AZURE_SPEECH_KEY"]
+   └→ raise CredentialError("Missing required environment variable(s): AZURE_SPEECH_KEY")
+   ↓
+main() catches CredentialError
+   ↓
+print("Error: Missing required environment variable(s): AZURE_SPEECH_KEY", file=sys.stderr)
+return 1
+   ↓
+User ← exit code 1
 ```
 
-If either is unset or empty, raises `CredentialError` naming the missing variable(s).
+## HTTP call (future: issues #8, #10)
 
-### Output (JSON)
+When [issue #8](https://github.com/njrenaissance/transcribe/issues/8) adds transcription, the flow will be:
 
-Once issue #10 is implemented, for each input `FILE`:
+```python
+# POST to Azure fast-transcription endpoint
+POST /cognitiveservices/v1/speechtotext/transcriptions:transcribe
+  ?api-version=2025-10-15
+  
+Headers:
+  Ocp-Apim-Subscription-Key: {credentials.key}
+  
+Body:
+  multipart/form-data
+  ├ audio: (file bytes)
+  └ definition: {"locales": ["en-US"], ...}
+  
+Response (2xx):
+  {
+    "durationMilliseconds": 12340,
+    "phrases": [
+      {"offsetMilliseconds": 0, "durationMilliseconds": 2500, "text": "Hello world", "locale": "en-US"}
+    ]
+  }
+```
 
+**Transform to output schema** (issue #10):
 ```json
 {
   "source_file": "audio.mp3",
-  "language": "en-US",
+  "language": "en",
   "duration_seconds": 12.34,
   "segments": [
-    {
-      "start": 0.0,
-      "end": 2.5,
-      "text": "Hello world"
-    },
-    {
-      "start": 2.5,
-      "end": 5.0,
-      "text": "This is a test"
-    }
+    {"start": 0.0, "end": 2.5, "text": "Hello world"}
   ]
 }
 ```
 
-**Mapping (from Azure fast-transcription response):**
-- `source_file` ← input file name
-- `language` ← phrases' locale (or requested locale from definition)
-- `duration_seconds` ← `durationMilliseconds / 1000`
-- `segments[].start` ← `offsetMilliseconds / 1000`
-- `segments[].end` ← `(offsetMilliseconds + durationMilliseconds) / 1000`
-- `segments[].text` ← phrase text
+## Design decisions
 
-See `/spec/spec.md` "Result → output-schema mapping" for full details.
+See [ADRs](../spec/adr/) for detailed rationale:
 
-## Dependencies
+- **ADR-0001:** Azure AI Speech as the transcription provider
+- **ADR-0002:** Terraform for infrastructure (local state, Cognitive Services resource)
+- **ADR-0003:** Fast (synchronous) transcription for local files; batch (asynchronous) deferred to Phase 2
+  - Simplicity: no blob storage, no polling, no separate download
+  - Cost-effective for small files (current workload ~400 files, small total audio)
+  - Limitation: capped at ~5 hours / ~500 MB per file; larger files require Phase 2 batch mode
 
-### Runtime
-- **`httpx >= 0.28.1`** — HTTP client for Azure REST calls. Chosen in ADR-0003 because Azure's batch/fast transcription endpoints are not covered by the Azure SDK; direct REST is required.
+## Key constraints & limitations
 
-### Development
-- **`pytest >= 8.0.0`** — Test framework
-- **`pytest-cov >= 5.0.0`** — Coverage reporting
-- **`pytest-mock >= 3.14.0`** — Mocking for tests
-- **`ruff >= 0.9.0`** — Linting and formatting
-- **`mypy >= 1.13.0`** — Static type checking
-- **`pre-commit >= 4.0.0`** — Git hooks
+1. **File size cap:** Azure's fast-transcription endpoint caps at ~500 MB and ~5 hours per file. Larger files require Phase 2 (batch mode via blob storage).
 
-### Python Version
-- **Python 3.13** (see `pyproject.toml` requires-python)
+2. **Synchronous:** The CLI blocks until transcription completes. Not suitable for interactive use with very long files. Batch mode (Phase 2) will allow fire-and-forget jobs.
 
-## Key Design Decisions
+3. **No retry logic yet:** Failed calls (transient network errors, temporary Azure outages) are not retried. Implement in orchestration phase if needed.
 
-| Decision | Reference | Rationale |
-|----------|-----------|-----------|
-| **Use Azure AI Speech (not local model)** | [ADR-0001](/spec/adr/0001-azure-ai-speech-transcription.md) | Existing Azure agreement; no on-premise infra needed; quality and features managed by Azure |
-| **Fast (sync) transcription for local files; batch deferred** | [ADR-0003](/spec/adr/0003-fast-transcription-for-local-files.md) | ~400 small files on disk; batch would require blob storage, SAS, polling overhead; fast is simpler and cost-neutral for small volumes |
-| **Local Terraform state (not remote backend)** | [ADR-0002](/spec/adr/0002-terraform-for-azure-infra.md) | Lightweight infra; local state is sufficient; keeps barrier to entry low |
-| **Environment variables for credentials (no pydantic-settings)** | `/CLAUDE.md` Profile | Project has app config disabled; env-var-only is simple and sufficient |
-| **Plain exceptions + error hierarchy (no structured logging)** | `/CLAUDE.md` Profile | Structured logging disabled; AppError hierarchy + stderr printing is sufficient for CLI error reporting |
+4. **Single-threaded:** Files are processed sequentially. Parallelization (async I/O or thread pool) is deferred.
 
-## Extension Points (Phase 2 and Beyond)
+## Testing strategy
 
-### Adding Blob-Staged Batch Mode
-- Add storage credentials (`AZURE_STORAGE_ACCOUNT`, `AZURE_STORAGE_KEY`) to `credentials.py`
-- Create `transcriber_batch.py` module for blob upload, SAS, batch submit, polling
-- Modify `main.py` to detect file size and route to fast-vs-batch
-- Add `TranscriptionBatchError` and `BatchTimeoutError` to error hierarchy
+See [Testing Guide](./testing.md) for detailed guidance.
 
-### Scaling Output
-- Currently outputs one JSON file per input. For bulk transcription, consider:
-  - Batch output to a single results file
-  - Async job tracking / status API
-  - Database storage (currently deferred)
+**Current test coverage (Phase 1):**
+- Unit tests for CLI parsing (`test_cli.py`)
+  - Argument parsing (with/without arguments)
+  - File existence and extension validation
+  - Parametrized tests for case-insensitive extension matching
 
-### Supporting More Audio Formats
-- Currently `{".mp3", ".wav"}`. To add more:
-  - Update `SUPPORTED_EXTENSIONS` in `cli.py`
-  - Test Azure support for the format
-  - Update `/spec/spec.md` "done criteria" if format-specific behavior differs
+- Unit tests for credentials (`test_credentials.py`)
+  - Loading when both env vars present
+  - Raising `CredentialError` when one or both missing
+  - Naming exactly which variable(s) are missing
 
-## Testing Strategy
+- Unit tests for main entrypoint (`test_main.py`)
+  - Exit code 0 on success
+  - Exit code 1 on AppError
+  - Error message to stderr
 
-- **Unit tests** (in `/tests/`, marked `@pytest.mark.unit`):
-  - `test_cli.py` — Argument parsing and validation logic
-  - `test_credentials.py` — Env var loading
-  - `test_main.py` — Main entrypoint and error handling
-  
-- **Integration tests** (marked `@pytest.mark.integration`):
-  - Currently empty (awaiting issue #8 implementation of transcription call)
-  - Will mock or use real Azure endpoint to verify transcription and output transformation
+**Integration tests (deferred):** Will test end-to-end flow with mock or real Azure endpoint after issue #8 (transcription call) is implemented.
 
-- **Coverage:** 70% minimum (enforced by `pyproject.toml` `tool.coverage.report.fail_under`)
+## Next steps for implementation
 
-See [Testing Guide](../testing/overview.md) for details.
+1. **Issue #8:** Add `transcribe_file(path: Path, credentials: AzureCredentials) → dict` function to make the Azure call and return the raw response
+   - Use `httpx.post()` to send multipart request
+   - Handle non-2xx responses as `TranscriptionError`
+   - Handle timeouts as `TranscriptionTimeoutError`
 
-## Related Architecture Decision Records
+2. **Issue #10:** Add `transform_result(azure_response: dict, source_file: str) → dict` to map Azure's response to output schema
+   - Extract `durationMilliseconds`, `phrases`
+   - Build segments list with start/end/text
+   - Infer language from phrases' `locale` field
 
-- **[ADR-0001: Use Azure AI Speech](../spec/adr/0001-azure-ai-speech-transcription.md)** — Why Azure (not local model)
-- **[ADR-0002: Terraform for Azure Infra](../spec/adr/0002-terraform-for-azure-infra.md)** — Local state, resource group, scaling
-- **[ADR-0003: Fast Transcription for Local Files](../spec/adr/0003-fast-transcription-for-local-files.md)** — Two-mode design, fast vs batch split, Phase 2 deferral
+3. **Issue #11:** Update `main()` to orchestrate end-to-end:
+   - For each file, call `load_azure_credentials()`, `transcribe_file()`, `transform_result()`, write JSON
+   - Collect per-file errors
+   - Report all errors to stderr
+   - Exit 0 only if all files succeeded
+
+See [spec.md](../spec/spec.md) for detailed requirements and done criteria for each issue.
+
