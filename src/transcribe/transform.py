@@ -1,6 +1,7 @@
 """Transform Azure fast-transcription results + a call record into TEXT-with-frontmatter output."""
 
 import os
+import re
 import tempfile
 import time
 from dataclasses import dataclass
@@ -18,6 +19,11 @@ from .errors import AppError, EmptyTranscriptionResultError, OutputWriteError
 # time from the start of the call, not a wall-clock time, so this reads as
 # hours/minutes/seconds *since the call began*.
 DEFAULT_TIMESTAMP_FORMAT = "%H:%M:%S"
+
+# The directives `time.strftime` documents support, per
+# https://docs.python.org/3/library/time.html#time.strftime -- used to validate
+# --timestamp-format portably (see `validate_timestamp_format`).
+_VALID_STRFTIME_DIRECTIVES = frozenset("aAbBcdHIjmMpSUwWxXyYzZ%")
 
 _CALL_RECORD_FIELDS = (
     "ref",
@@ -86,12 +92,23 @@ def _base_frontmatter(source_path: Path, call_record: CallRecord | None) -> Fron
 
 
 def validate_timestamp_format(timestamp_format: str) -> None:
-    """Validate that `timestamp_format` is usable with `time.strftime`, failing fast at startup.
+    """Validate that `timestamp_format` uses only documented `time.strftime` directives.
+
+    Checked against the directive set documented at
+    https://docs.python.org/3/library/time.html#time.strftime rather than by calling
+    `time.strftime` itself: that delegates to the platform C library, and glibc (Linux)
+    silently passes an unrecognized directive like "%Q" straight through instead of
+    raising, while Windows' CRT rejects it -- so calling it can't be relied on to catch
+    an invalid format the same way on every platform this runs on.
 
     Raises:
-        ValueError: if `timestamp_format` contains a directive `time.strftime` rejects.
+        ValueError: if `timestamp_format` contains a directive outside that set, or a
+            trailing `%` with no directive character after it.
     """
-    time.strftime(timestamp_format, time.gmtime(0))
+    for match in re.finditer(r"%(.?)", timestamp_format):
+        directive = match.group(1)
+        if directive not in _VALID_STRFTIME_DIRECTIVES:
+            raise ValueError(f"Invalid timestamp format directive: '%{directive}'")
 
 
 def _format_timestamp(seconds: float, timestamp_format: str) -> str:
