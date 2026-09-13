@@ -54,6 +54,10 @@ _FRONTMATTER_KEY_ORDER = [
     "text_message",
     "audio_duration",
     "detected_locales",
+    "average_confidence",
+    "coverage_ratio",
+    "word_density",
+    "needs_review",
 ]
 
 
@@ -79,6 +83,10 @@ def test_transform_result_builds_frontmatter_from_call_record(tmp_path):
         "text_message": None,
         "audio_duration": 2500,
         "detected_locales": ["en-US"],
+        "average_confidence": None,
+        "coverage_ratio": 1.0,
+        "word_density": 0.8,
+        "needs_review": True,
     }
 
 
@@ -204,6 +212,84 @@ def test_transform_result_detected_locales_empty_when_no_phrase_reports_locale(t
     output = transform_result(result, source_path, _CALL_RECORD)
 
     assert output.frontmatter["detected_locales"] == []
+
+
+@pytest.mark.unit
+def test_transform_result_computes_average_confidence_across_phrases(tmp_path):
+    source_path = tmp_path / "audio.mp3"
+    result = {
+        "durationMilliseconds": 4000,
+        "phrases": [
+            {"offsetMilliseconds": 0, "durationMilliseconds": 2000, "text": "Hi there", "confidence": 0.6},
+            {"offsetMilliseconds": 2000, "durationMilliseconds": 2000, "text": "Hi back", "confidence": 0.4},
+        ],
+    }
+
+    output = transform_result(result, source_path, _CALL_RECORD)
+
+    expected_average = (0.6 + 0.4) / 2
+    assert output.frontmatter["average_confidence"] == expected_average
+
+
+@pytest.mark.unit
+def test_transform_result_average_confidence_none_when_no_phrase_reports_it(tmp_path):
+    source_path = tmp_path / "audio.mp3"
+    result = {
+        "durationMilliseconds": 2000,
+        "phrases": [{"offsetMilliseconds": 0, "durationMilliseconds": 2000, "text": "Hello there"}],
+    }
+
+    output = transform_result(result, source_path, _CALL_RECORD)
+
+    assert output.frontmatter["average_confidence"] is None
+
+
+@pytest.mark.unit
+def test_transform_result_needs_review_false_for_dense_full_coverage_transcript(tmp_path):
+    source_path = tmp_path / "audio.mp3"
+    result = {
+        "durationMilliseconds": 4000,
+        "phrases": [
+            {
+                "offsetMilliseconds": 0,
+                "durationMilliseconds": 4000,
+                "text": "This call has plenty of words spoken throughout its whole duration",
+            }
+        ],
+    }
+
+    output = transform_result(result, source_path, _CALL_RECORD)
+
+    assert output.frontmatter["coverage_ratio"] == 1.0
+    assert output.frontmatter["needs_review"] is False
+
+
+@pytest.mark.unit
+def test_transform_result_needs_review_true_for_low_coverage_transcript(tmp_path):
+    source_path = tmp_path / "audio.mp3"
+    result = {
+        "durationMilliseconds": 20000,
+        "phrases": [{"offsetMilliseconds": 0, "durationMilliseconds": 2000, "text": "Hello there friend"}],
+    }
+
+    output = transform_result(result, source_path, _CALL_RECORD)
+
+    assert output.frontmatter["coverage_ratio"] == pytest.approx(0.1)
+    assert output.frontmatter["needs_review"] is True
+
+
+@pytest.mark.unit
+def test_transform_result_needs_review_true_for_low_word_density_transcript(tmp_path):
+    source_path = tmp_path / "audio.mp3"
+    result = {
+        "durationMilliseconds": 20000,
+        "phrases": [{"offsetMilliseconds": 0, "durationMilliseconds": 20000, "text": "One word here"}],
+    }
+
+    output = transform_result(result, source_path, _CALL_RECORD)
+
+    assert output.frontmatter["word_density"] == pytest.approx(0.15)
+    assert output.frontmatter["needs_review"] is True
 
 
 @pytest.mark.unit
