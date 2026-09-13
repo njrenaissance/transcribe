@@ -75,17 +75,20 @@ def parse_args(argv: list[str]) -> ParsedArgs:
     
     # Validate mutual exclusivity and resolve entries
     entries = _resolve_entries(args)  # Returns list[ManifestEntry]
+    validate_timestamp_format(args.timestamp_format)  # Fail early on bad strftime format
     
     return ParsedArgs(
         entries=entries,
         clobber=args.clobber,
         call_db=args.call_db,
+        destination=args.destination,
+        timestamp_format=args.timestamp_format,
     )
 ```
 
-**Output (batch mode):** `ParsedArgs(entries=[ManifestEntry(ref="C001", target="5551234567", audio_path="audio.mp3"), ...], clobber=False, call_db=Path("calls.db"))`
+**Output (batch mode):** `ParsedArgs(entries=[ManifestEntry(ref="C001", target="5551234567", audio_path="audio.mp3"), ...], clobber=False, call_db=Path("calls.db"), destination=None, timestamp_format="%H:%M:%S")`
 
-**Output (single-file mode):** `ParsedArgs(entries=[ManifestEntry(ref="C001", target="5551234567", audio_path="audio.mp3")], clobber=False, call_db=Path("calls.db"))`
+**Output (single-file mode with options):** `ParsedArgs(entries=[ManifestEntry(ref="C001", target="5551234567", audio_path="audio.mp3")], clobber=False, call_db=Path("calls.db"), destination=Path("/archive"), timestamp_format="%M:%S")`
 
 **Error cases:**
 - No args provided: argparse exits with code 2 and prints usage
@@ -141,21 +144,20 @@ class CallDatabase:
 - Database file not found or unreadable: raises `CallDbError`
 - Caught in `main()`, printed to stderr, exits code 1
 
-### 5. Process one file (`src/transcribe/main.py:_process_file`)
+### 5. Process one file (`src/transcribe/main.py:_process_entry`)
 
 ```python
-def _process_file(
+def _process_entry(
     entry: ManifestEntry,
     credentials: AzureCredentials,
-    call_db: CallDatabase,
-    clobber: bool,
-) -> None:
+    call_db: sqlite3.Connection,
+    options: RunOptions,
+) -> bool:
     audio_path = Path(entry.audio_path)
-    output_path = audio_path.with_stem(audio_path.stem + "-transcript")
     
-    # Step 5a: Resume check
-    if not clobber and has_existing_transcript(output_path):
-        return  # Skip this file
+    # Step 5a: Resume check (honors --destination and --clobber)
+    if not options.clobber and has_existing_transcript(audio_path, entry.ref, entry.target, options.destination):
+        return True  # Skip this file
     
     # Step 5b: Validate audio file
     validate_file(audio_path)
@@ -164,37 +166,45 @@ def _process_file(
     result = transcribe_file(audio_path, credentials)
     
     # Step 5d: Look up call metadata
-    call_record = call_db.lookup(entry.ref, entry.target)  # May be None
+    call_record = find_call_record(call_db, entry.ref, entry.target)  # May be None
     
-    # Step 5e: Transform to YAML frontmatter + body
-    output = transform_result(result, audio_path, call_record)
+    # Step 5e: Transform to YAML frontmatter + body (with timestamp format + speaker labels)
+    output = transform_result(result, audio_path, call_record, options.timestamp_format)
     
-    # Step 5f: Write {stem}-transcript.txt atomically
-    write_transcript_file(output, output_path)
+    # Step 5f: Write to output path (respects --destination for naming)
+    write_transcript_txt(output, audio_path, entry.ref, entry.target, options.destination)
+    
+    return False  # Not skipped
 ```
 
-#### 5a. Resume check (`src/transcribe/main.py:has_existing_transcript`)
+**RunOptions** carries per-run settings:
+- `clobber`: Skip resume check if True
+- `destination`: Directory to write transcripts (if None, co-locate with source)
+- `timestamp_format`: `time.strftime` format for segment timestamps
 
-**Input:** `Path("audio-transcript.txt")`
+#### 5a. Resume check (`src/transcribe/transform.py:has_existing_transcript`)
+
+**Input:** `Path("audio.mp3")`, `ref="C001"`, `target="5551234567"`, `destination=None`
 
 ```python
-def has_existing_transcript(output_path: Path) -> bool:
-    """Check if a successful transcript already exists."""
-    if not output_path.exists():
+def has_existing_transcript(source_path: Path, ref: str, target: str, destination: Path | None = None) -> bool:
+    """Check if a successful transcript already exists at the expected output path."""
+    # Calculate output path (respects --destination)
+    output_file = output_path(source_path, ref, target, destination)
+    
+    if not output_file.exists():
         return False
     
     try:
-        with open(output_path) as f:
-            frontmatter_str = f.read(500)  # Read frontmatter block
-        frontmatter = yaml.safe_load(frontmatter_str)
+        frontmatter = _read_frontmatter(output_file)
         return "error" not in frontmatter  # Success if no error field
-    except Exception:
+    except (OSError, ValueError, yaml.YAMLError):
         return False  # Corrupt or unreadable = not done, retry
 ```
 
 **Output:** `True` if file exists and succeeded (no `error` key), `False` otherwise
 
-**Logic:** If `--clobber` is set, this check is skipped entirely and the file is always reprocessed.
+**Logic:** If `--clobber` is set, this check is skipped entirely and the file is always reprocessed. Output path respects `--destination` flag (e.g., `/archive/C001-5551234567-audio-transcript.txt`).
 
 #### 5b. Validate file (`src/transcribe/cli.py:validate_file`)
 
@@ -215,28 +225,32 @@ def validate_file(path: Path) -> None:
 
 #### 5c. Transcribe via Azure (`src/transcribe/transcription.py:transcribe_file`)
 
-**Input:** `Path("audio.mp3")`, `AzureCredentials`
+**Input:** `Path("audio.mp3")`, `AzureCredentials`, `timeout=60.0` (optional)
 
 ```python
 def transcribe_file(
     path: Path,
     credentials: AzureCredentials,
-    requested_locale: str = DEFAULT_LOCALE,
+    timeout: float = 60.0,
 ) -> dict[str, Any]:
     # Read file from disk
     with open(path, "rb") as f:
         audio_bytes = f.read()
     
-    # Build multipart request
+    # Build multipart request with multi-locale candidates and diarization
     response = httpx.post(
-        f"{credentials.endpoint}/cognitiveservices/v1/speechtotext/transcriptions:transcribe",
+        f"{credentials.endpoint}/speechtotext/transcriptions:transcribe",
         params={"api-version": "2025-10-15"},
         headers={"Ocp-Apim-Subscription-Key": credentials.key},
         files={
             "audio": audio_bytes,
-            "definition": json.dumps({"locales": [requested_locale]})
+            "definition": json.dumps({
+                "locales": list(transcription.CANDIDATE_LOCALES),  # ("en-US", "es-US")
+                "profanityFilterMode": "None",  # Legal discovery requires unfiltered text
+                "diarization": {"maxSpeakers": 2, "enabled": True}  # Two-party calls
+            })
         },
-        timeout=30,
+        timeout=timeout,
     )
     
     if response.status_code != 200:
@@ -245,19 +259,23 @@ def transcribe_file(
     return response.json()
 ```
 
-**Azure response format:**
+**Azure response format (success, 2xx):**
 ```json
 {
   "durationMilliseconds": 12340,
   "phrases": [
-    {"offsetMilliseconds": 0, "durationMilliseconds": 2500, "text": "Hello world", "locale": "en-US"}
+    {"offsetMilliseconds": 0, "durationMilliseconds": 2500, "text": "Hello world", "locale": "en-US", "speaker": 1},
+    {"offsetMilliseconds": 2500, "durationMilliseconds": 2500, "text": "How are you?", "locale": "es-US", "speaker": 2}
   ]
 }
 ```
 
-**Error cases:**
-- Network timeout: raises `TranscriptionTimeoutError`
-- Non-2xx response: raises `TranscriptionError`
+**Error handling:**
+- Network timeout: raises `TranscriptionTimeoutError`, caught in `_process_entry` per-file handler, error output written
+- Non-2xx response (Azure 422 `NoLanguageIdentified`): raises `LanguageNotIdentifiedError`, caught per-file, error output written (very short/low-signal audio)
+- Non-2xx response (Azure 422 `MultipleLanguagesIdentified`): raises `MultipleLanguagesIdentifiedError`, caught per-file, error output written (mixed-language/code-switching audio)
+- Other non-2xx response: raises `TranscriptionError`, caught per-file, error output written
+- All error types carry the source path and a reason string for audit trailing
 
 #### 5d. Look up call metadata (`src/transcribe/call_lookup.py:CallDatabase.lookup`)
 
@@ -288,32 +306,63 @@ def lookup(self, ref: str, target: str) -> CallRecord | None:
 
 #### 5e. Transform result (`src/transcribe/transform.py:transform_result`)
 
-**Input:** Azure result dict + `Path("audio.mp3")` + `CallRecord | None`
+**Input:** Azure result dict + `Path("audio.mp3")` + `CallRecord | None` + `timestamp_format="%H:%M:%S"`
 
 ```python
 def transform_result(
     result: dict[str, Any],
     source_path: Path,
     call_record: CallRecord | None,
-    requested_locale: str = "en-US",
-) -> TranscriptOutput | ErrorOutput:
-    """Transform Azure result + call record into YAML frontmatter + body."""
+    timestamp_format: str = DEFAULT_TIMESTAMP_FORMAT,
+) -> TranscriptOutput:
+    """Transform Azure result + call record into YAML frontmatter + body with speaker labels."""
     
-    # Build frontmatter from call_record (or None fields if no record)
-    frontmatter = _base_frontmatter(source_path, call_record)
-    
-    # Extract phrases
+    # Extract and validate phrases
     phrases = result.get("phrases") or []
     if not phrases:
         raise EmptyTranscriptionResultError(source_path)
     
-    # Build segments
-    segments: list[Segment] = sorted(...)  # Same as before
+    # Build frontmatter from call_record (or None fields if no record)
+    frontmatter = _base_frontmatter(source_path, call_record)
+    frontmatter["audio_duration"] = result["durationMilliseconds"]
+    frontmatter["detected_locales"] = _detected_locales(phrases)  # List of distinct locales per phrase
     
-    # Render body
-    body = _render_body(segments)
+    # Build segments with speaker labels and timestamps
+    segments: list[Segment] = sorted(
+        (
+            Segment(
+                start=phrase["offsetMilliseconds"] / 1000,
+                end=(phrase["offsetMilliseconds"] + phrase["durationMilliseconds"]) / 1000,
+                text=phrase["text"],
+                speaker=phrase.get("speaker"),  # 1, 2, or None
+            )
+            for phrase in phrases
+        ),
+        key=lambda segment: segment["start"],
+    )
+    
+    # Render body with speaker labels formatted per timestamp_format
+    body = _render_body(segments, timestamp_format)
     
     return TranscriptOutput(frontmatter=frontmatter, body=body)
+```
+
+**Helper: `_detected_locales(phrases)`** — Collects distinct locales from all phrases:
+```python
+def _detected_locales(phrases: list[dict[str, Any]]) -> list[str]:
+    """Distinct locales across phrases, sorted (see ADR-0007 on language identification)."""
+    return sorted({locale for phrase in phrases if (locale := phrase.get("locale"))})
+```
+
+**Helper: `_render_segment(segment, timestamp_format)`** — Formats one segment with speaker:
+```python
+def _render_segment(segment: Segment, timestamp_format: str) -> str:
+    start = _format_timestamp(segment["start"], timestamp_format)
+    end = _format_timestamp(segment["end"], timestamp_format)
+    timing = f"{start} - {end}"
+    if segment["speaker"] is None:
+        return f"{timing} {segment['text']}"
+    return f"{timing} Speaker {segment['speaker']}: {segment['text']}"
 ```
 
 **Output schema (on success):**
@@ -324,6 +373,14 @@ ref: C001
 target: 5551234567
 associate: null
 direction: null
+audio_duration: 12340
+detected_locales:
+  - en-US
+  - es-US
+average_confidence: 0.78
+coverage_ratio: 0.85
+word_density: 1.9
+needs_review: false
 call_start: null
 duration: null
 end_time: null
