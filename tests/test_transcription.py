@@ -47,6 +47,21 @@ def test_transcribe_file_sends_every_candidate_locale_for_language_identificatio
 
 
 @pytest.mark.unit
+def test_transcribe_file_disables_profanity_filtering(mocker, tmp_path):
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"fake-audio-bytes")
+    response = httpx.Response(
+        200, json={"durationMilliseconds": 0, "phrases": []}, request=httpx.Request("POST", "https://example.com")
+    )
+    mock_post = mocker.patch("transcribe.transcription.httpx.post", return_value=response)
+
+    transcribe_file(audio_path, _CREDENTIALS)
+
+    definition = json.loads(mock_post.call_args.kwargs["files"]["definition"][1])
+    assert definition["profanityFilterMode"] == "None"
+
+
+@pytest.mark.unit
 def test_transcribe_file_raises_transcription_error_on_non_2xx_response(mocker, tmp_path):
     audio_path = tmp_path / "audio.wav"
     audio_path.write_bytes(b"fake-audio-bytes")
