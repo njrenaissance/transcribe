@@ -16,6 +16,10 @@ _DEFAULT_TIMEOUT_SECONDS = 60.0
 # best-matching candidate per phrase (reported back as that phrase's `locale`)
 # instead of forcing every phrase into a single fixed locale.
 CANDIDATE_LOCALES = ("en-US", "es-US")
+# Azure defaults to masking profanity with asterisks. These are legal-discovery
+# transcripts, not consumer-facing text — a masked word is lost evidence, not a
+# feature, so recognition results pass through unfiltered.
+_PROFANITY_FILTER_MODE = "None"
 _AUDIO_CONTENT_TYPES = {".mp3": "audio/mpeg", ".wav": "audio/wav"}
 _DEFAULT_AUDIO_CONTENT_TYPE = "application/octet-stream"
 
@@ -45,7 +49,9 @@ def transcribe_file(
     url = f"{credentials.endpoint}/speechtotext/transcriptions:transcribe?api-version={_API_VERSION}"
     headers = {"Ocp-Apim-Subscription-Key": credentials.key}
     audio_content_type = _AUDIO_CONTENT_TYPES.get(path.suffix.lower(), _DEFAULT_AUDIO_CONTENT_TYPE)
-    definition = json.dumps({"locales": list(CANDIDATE_LOCALES)}).encode("utf-8")
+    definition = json.dumps({"locales": list(CANDIDATE_LOCALES), "profanityFilterMode": _PROFANITY_FILTER_MODE}).encode(
+        "utf-8"
+    )
     files = {
         "audio": (path.name, path.read_bytes(), audio_content_type),
         "definition": (None, definition, "application/json"),
