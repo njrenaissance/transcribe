@@ -24,15 +24,19 @@ transcribe --ref CALL-001 --target 5551234567 --audiopath audio.mp3 --call-db ca
 - `--audiopath`: Path to audio file (local path or URL; only local files supported today)
 - `--call-db`: Path to call-inventory SQLite database (required)
 - `--clobber`: Force reprocess even if output exists (optional, see resume behavior below)
+- `--destination`: Write all transcripts to this directory instead of next to source files (optional; see naming below)
+- `--timestamp-format`: Time format for segment timestamps, as a `time.strftime` string (optional, default: `"%H:%M:%S"`)
 
 **Command line — batch mode:**
 ```bash
-transcribe --manifest manifest.csv --call-db calls.db [--clobber]
+transcribe --manifest manifest.csv --call-db calls.db [--clobber] [--destination DIR] [--timestamp-format FORMAT]
 ```
 
 - `--manifest`: Path to CSV file with columns `ref`, `target`, `audio_path` (required)
 - `--call-db`: Path to call-inventory SQLite database (required)
 - `--clobber`: Force reprocess all files (optional)
+- `--destination`: Write all transcripts to this directory instead of next to source files (optional; see naming below)
+- `--timestamp-format`: Time format for segment timestamps, as a `time.strftime` string (optional, default: `"%H:%M:%S"`)
 
 **Environment:**
 ```bash
@@ -54,13 +58,20 @@ export CALL_DB_PATH=/path/to/calls.db  # Optional; --call-db takes precedence
 
 **Files written:**
 ```bash
+# Default: co-located with source
 $ transcribe --ref C001 --target 5551234567 --audiopath audio.mp3 --call-db calls.db
 $ ls -la audio*
 -rw-r--r--  audio.mp3
 -rw-r--r--  audio-transcript.txt
+
+# With --destination: centralized, prefixed with ref/target
+$ transcribe --manifest manifest.csv --call-db calls.db --destination /archive/
+$ ls /archive/
+C001-5551234567-audio-transcript.txt
+C002-5551234568-call2-transcript.txt
 ```
 
-**Output schema — success** (`{stem}-transcript.txt` with YAML frontmatter + body):
+**Output schema — success** (`{stem}-transcript.txt` or `{ref}-{target}-{stem}-transcript.txt` with YAML frontmatter + body):
 ```
 ---
 source_file: audio.mp3
@@ -76,11 +87,18 @@ call_progress: Completed
 language: en
 monitor: "Agent 1"
 text_message: null
+audio_duration: 12340
+detected_locales:
+  - en-US
+average_confidence: 0.85
+coverage_ratio: 0.95
+word_density: 2.5
+needs_review: false
 ---
 
-[0.0-2.5] Hello, this is the call center.
-[2.5-5.0] How can I assist you today?
-[5.0-7.5] I'm looking for information about...
+00:00:00 - 00:00:02 Speaker 1: Hello, this is the call center.
+00:00:02 - 00:00:05 Speaker 2: How can I assist you today?
+00:00:05 - 00:00:07 I'm looking for information about...
 ```
 
 **Frontmatter fields:**
@@ -88,11 +106,22 @@ text_message: null
 - `ref` (string | null): Call reference number from manifest/--ref
 - `target` (string | null): Target phone number from manifest/--target
 - `associate`, `direction`, `call_start`, `duration`, `end_time`, `classification`, `call_progress`, `language`, `monitor`, `text_message` (all strings or null): Call record fields from the SQLite lookup
+- `audio_duration` (int): Duration of the audio file in milliseconds
+- `detected_locales` (list[str]): Locales identified by Azure's language identification (see ADR-0007). May be an empty list if Azure could not identify locale for any phrase.
+- `average_confidence` (float | null): Azure's mean per-phrase confidence score (0–1, rounded to 3 decimals). Null if no phrase reports confidence.
+- `coverage_ratio` (float): Fraction of total audio duration covered by recognized phrases (0–1, rounded to 3 decimals). Low values indicate sparse recognition.
+- `word_density` (float): Words per second of covered audio (rounded to 3 decimals). Low values suggest truncated or very sparse recognition.
+- `needs_review` (bool): Warning flag set when `coverage_ratio < 0.30` or `word_density < 1.0`, indicating potential quality issues worth human review. A `false` value is not a guarantee, only the absence of these particular warning signs.
 
 **Body format:**
-- One line per segment: `[start-end] text`
-- Times in seconds, 0.1 precision
+- One line per segment: `start - end Speaker N: text` (or just `start - end text` if speaker unknown)
+- Start/end times formatted according to `--timestamp-format` (default: `%H:%M:%S`), relative to the start of the call
+- Speaker numbers are 1-based and come from Azure diarization; a segment with no speaker ID is output without speaker label
 - Empty if the file had no phrases or if the call record was not found (but frontmatter always populated with source_file + null fields)
+
+**Output naming:**
+- Default (no `--destination`): `{source_path.stem}-transcript.txt` (same directory as source)
+- With `--destination DIR`: `{ref}-{target}-{source_path.stem}-transcript.txt` (in the specified directory, prefixed with ref/target to avoid collisions when multiple calls share the same filename)
 
 **Output schema — failure** (`{stem}-transcript.txt` with YAML frontmatter only, no body):
 ```
@@ -213,7 +242,10 @@ POST /cognitiveservices/v1/speechtotext/transcriptions:transcribe?api-version=20
 - Header: `Ocp-Apim-Subscription-Key: {AZURE_SPEECH_KEY}`
 - Body:
   - `audio` (binary part): File bytes
-  - `definition` (JSON part): `{"locales": ["en-US"]}` or similar
+  - `definition` (JSON part): `{"locales": ["en-US", "es-US"], "profanityFilterMode": "None", "diarization": {"maxSpeakers": 2, "enabled": true}}`
+    - Sends multiple candidate locales for per-phrase language identification (see ADR-0007)
+    - Profanity masking disabled (legal discovery requires unfiltered text)
+    - Diarization enabled to label speakers in two-party calls
 
 **Response format (success, 2xx):**
 ```json
@@ -224,38 +256,47 @@ POST /cognitiveservices/v1/speechtotext/transcriptions:transcribe?api-version=20
       "offsetMilliseconds": 0,
       "durationMilliseconds": 2500,
       "text": "Hello world",
-      "locale": "en-US"
+      "locale": "en-US",
+      "speaker": 1
     },
     {
       "offsetMilliseconds": 2500,
       "durationMilliseconds": 2500,
       "text": "How are you?",
-      "locale": "en-US"
+      "locale": "es-US",
+      "speaker": 2
     }
   ]
 }
 ```
 
 **Error handling:**
-- Non-2xx response: `TranscriptionError`, caught per-file, error-echoing output written
-- Network timeout (default 30s): `TranscriptionTimeoutError`, caught per-file, error-echoing output written
+- Non-2xx response (other than 422 language-ID errors): `TranscriptionError`, caught per-file, error-echoing output written
+- Network timeout (default 60s): `TranscriptionTimeoutError`, caught per-file, error-echoing output written
 - Empty phrases list: `EmptyTranscriptionResultError`, caught per-file, error-echoing output written
 - Auth failure (401, 403): `TranscriptionError`, caught per-file, error-echoing output written
+- Azure 422 `NoLanguageIdentified`: `LanguageNotIdentifiedError` (very short/low-signal audio where no confident locale match found among candidate locales), caught per-file, error-echoing output written
+- Azure 422 `MultipleLanguagesIdentified`: `MultipleLanguagesIdentifiedError` (genuinely mixed-language audio or code-switching with no single dominant language), caught per-file, error-echoing output written
 
 ## Output transformation requirements (issue #10 + issue #20)
 
-**YAML frontmatter:** Built from call record fields (all required fields present, even if null):
+**YAML frontmatter:** Built from call record fields and transcription result (all required fields present, even if null):
 - `source_file`: Input file's basename
 - `ref`, `target`, `associate`, `direction`, `call_start`, `duration`, `end_time`, `classification`, `call_progress`, `language`, `monitor`, `text_message`: From call record (or null if lookup failed)
+- `audio_duration` (int): Duration of audio in milliseconds from Azure response
+- `detected_locales` (list[str]): List of distinct locales Azure identified across phrases (may be empty if Azure omitted locale on all phrases; see ADR-0007)
 - On error: add `error` field with failure message; omit body
 
-**Transcript body:** Rendered from Azure phrases
-- One line per segment: `[start-end] text`
-- Times in seconds, 0.1 precision
+**Transcript body:** Rendered from Azure phrases with diarization
+- One line per segment: `start - end Speaker N: text` (or `start - end text` if no speaker ID)
+- Start/end times formatted per `--timestamp-format` (default: `%H:%M:%S`), relative to call start
+- Segments sorted by start time
+- Speaker number (1, 2, etc.) comes from Azure diarization; null speaker outputs without label
+- Segment text taken directly from Azure phrase text
 - If no phrases (empty transcript): only frontmatter, no error (output file still created for audit trailing; call frontmatter still populated)
 
 **Atomic write:**
-- Write to temp file in same directory as output, then rename into place
+- Write to temp file in output directory, then rename into place
 - Ensures partial/corrupt writes never leave broken output
 - Failure to write raises `OutputWriteError`, caught per-file, error-echoing output attempted (but may fail if directory is unwritable)
 

@@ -40,10 +40,17 @@ call_progress: "Completed"
 language: en
 monitor: "Agent 1"
 text_message: null
+audio_duration: 12340
+detected_locales:
+  - en-US
+average_confidence: 0.85
+coverage_ratio: 0.95
+word_density: 2.5
+needs_review: false
 ---
 
-[0.0-2.5] Hello, this is the call center.
-[2.5-5.0] How can I assist you today?
+00:00:00 - 00:00:02 Speaker 1: Hello, this is the call center.
+00:00:02 - 00:00:05 Speaker 2: How can I assist you today?
 ```
 
 **Error output** (when transcription or lookup fails):
@@ -88,6 +95,12 @@ uv run transcribe --ref C001 --target 5551234567 --audiopath audio.mp3 --call-db
 
 # Batch mode
 uv run transcribe --manifest manifest.csv --call-db calls.db
+
+# Write transcripts to a shared directory (e.g., for SharePoint upload)
+uv run transcribe --manifest manifest.csv --call-db calls.db --destination /path/to/transcripts
+
+# Customize timestamp format in output (default: HH:MM:SS)
+uv run transcribe --manifest manifest.csv --call-db calls.db --timestamp-format "%M:%S"
 
 # Resume a partial run (skips files that already have successful output)
 uv run transcribe --manifest manifest.csv --call-db calls.db

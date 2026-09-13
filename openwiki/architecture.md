@@ -2,22 +2,28 @@
 
 ## System overview
 
-**transcribe** is a thin CLI wrapper around Azure AI Speech's fast (synchronous) transcription endpoint. The design prioritizes simplicity and early validation: bad inputs are rejected before any network call is made.
+**transcribe** is a thin CLI wrapper around Azure AI Speech's fast (synchronous) transcription endpoint. The design prioritizes simplicity, early validation, and atomic output files. Bad inputs are rejected before any network call is made; each file always gets output (success or error).
 
 ```
-User → CLI args
+User → CLI args (--manifest or --audiopath, --call-db, [--destination], [--timestamp-format])
    ↓
 [Parse & validate arguments]  (cli.py)
    ↓
 [Load credentials]  (credentials.py)
    ↓
-[POST to Azure fast-transcription endpoint]  (azure call via httpx)
+[Open call-inventory SQLite database]  (call_lookup.py)
    ↓
-[Transform result → output schema]
+[For each file in manifest or single entry:]
+├→ [Check if already transcribed (resume logic)]
+├→ [Validate audio file]
+├→ [POST to Azure fast-transcription endpoint with diarization + multi-locale candidates]  (transcription.py)
+├→ [Look up call metadata from SQLite]  (call_lookup.py)
+├→ [Transform result + metadata → YAML frontmatter + body with speaker labels]  (transform.py)
+└→ [Atomically write {stem}-transcript.txt (or {ref}-{target}-{stem}-transcript.txt)]
    ↓
-[Write FILE.json]
+[Report all errors to stderr; exit code 0 if all succeeded, 1 if any failed]
    ↓
-User ← exit code + stderr errors
+User ← exit code + stderr errors + {stem}-transcript.txt files (success or error for each input)
 ```
 
 ## Layered architecture
@@ -82,9 +88,16 @@ class AzureCredentials:
 AppError (base)
 ├── MissingFileError(path: Path)
 ├── UnsupportedFileTypeError(path: Path)
+├── ManifestError(path: Path, reason: str)
+├── CallDbError
+├── CallRecordNotFoundError(path: Path, ref: str, target: str)
 ├── CredentialError
 ├── TranscriptionError(path: Path, reason: str)
-└── TranscriptionTimeoutError(path: Path, timeout: float)
+├── TranscriptionTimeoutError(path: Path, timeout: float)
+├── LanguageNotIdentifiedError(path: Path)          # Azure 422 NoLanguageIdentified
+├── MultipleLanguagesIdentifiedError(path: Path)    # Azure 422 MultipleLanguagesIdentified
+├── EmptyTranscriptionResultError(path: Path)
+└── OutputWriteError(path: Path, reason: str)
 ```
 
 **Design rationale:**
