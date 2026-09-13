@@ -65,3 +65,29 @@ class ManifestError(AppError):
     def __init__(self, path: Path, reason: str) -> None:
         super().__init__(f"invalid manifest {path}: {reason}")
         self.path = path
+
+
+class CallDbError(AppError):
+    """Raised when the call-inventory SQLite database can't be opened or queried.
+
+    Aborts the whole run before the per-file loop starts (mirrors
+    `CredentialError`/`ManifestError`): every entry needs this database, so a
+    bad path isn't attributable to a single file.
+    """
+
+    def __init__(self, path: Path, reason: str) -> None:
+        super().__init__(f"invalid call-record database {path}: {reason}")
+        self.path = path
+
+
+class CallRecordNotFoundError(AppError):
+    """Raised when no row in the call-record database matches a ref+target pair.
+
+    A per-file failure (see ADR-0004): the input file itself may be fine, but
+    without a call record there's nothing to populate the frontmatter from.
+    """
+
+    def __init__(self, ref: str, target: str) -> None:
+        super().__init__(f"no call record found for ref={ref!r} target={target!r}")
+        self.ref = ref
+        self.target = target

@@ -20,64 +20,91 @@ The method split (fast for local, batch for blob) is recorded in
 provider decision in ADR-0001.
 
 ## Inputs / Outputs
-- Input: one or more local audio file paths as CLI arguments, e.g.
-  `transcribe audio.mp3 interview.wav`.
+- Input: either a CSV manifest (`--manifest FILE`, batch mode) with `ref`,
+  `target`, and `audio_path` columns — one row per call to transcribe — or a
+  single explicit request via `--audiopath PATH --ref REF --target TARGET`.
+  `audio_path`/`--audiopath` may be a local file path or a URL; only the
+  local-filesystem case is currently supported (see
+  `spec/adr/0006-yaml-frontmatter-txt-output.md`).
+- Input (call-record database): `--call-db PATH` (or the `CALL_DB_PATH`
+  environment variable) — call-inventory's SQLite index, queried by
+  `ref`+`target` for the output's frontmatter. See
+  `spec/adr/0005-direct-sqlite-read-of-call-inventory-index.md`.
 - Input (credentials): Azure Speech endpoint and key read from environment
   variables `AZURE_SPEECH_ENDPOINT` and `AZURE_SPEECH_KEY` (plain `os.environ`
   reads — this project has app config, i.e. `pydantic-settings`, disabled per
   `CLAUDE.md`). The local/fast mode needs only these; the deferred blob mode
   adds storage credentials (Phase 2).
-- Process (local/fast mode): for each input `FILE`:
-  1. Validate CLI arguments and the file (it exists and has a supported
-     extension) — before any Azure call.
-  2. Load and validate the Speech credentials.
-  3. `POST` the file to the fast transcription endpoint
+- Process (local/fast mode): for each entry:
+  1. Validate the file (it exists and has a supported extension) — before
+     any Azure call.
+  2. Load and validate the Speech credentials, and open the call-record
+     database — both once per run, before the per-entry loop.
+  3. Look up the entry's call record by `ref`+`target` in the call-record
+     database.
+  4. `POST` the file to the fast transcription endpoint
      (`.../speechtotext/transcriptions:transcribe?api-version=2025-10-15`) as
      `multipart/form-data` with an `audio` part (the file bytes) and a
      `definition` part (JSON: `locales`, etc.), authenticated with the
      `Ocp-Apim-Subscription-Key` header. The response body **is** the
      transcription result JSON — there is no job URL, polling, or separate
      download.
-  4. Transform the result JSON into this spec's output schema (below) and write
-     it to `FILE.json`.
-- Output: for each input `FILE`, exactly one sibling JSON file `FILE.json` —
-  written on success *and* on a per-file failure, so the output folder alone is
-  a complete, auditable record of every input file's outcome (see ADR-0004).
-  On success:
-  ```json
-  {
-    "source_file": "audio.mp3",
-    "language": "en",
-    "duration_seconds": 12.34,
-    "segments": [
-      {"start": 0.0, "end": 2.5, "text": "Hello world"}
-    ]
-  }
+  5. Transform the result and call record into this spec's output schema
+     (below) and write it to `FILE-transcript.txt`.
+- Output: for each input file, exactly one sibling text file
+  `FILE-transcript.txt` (`source_path.stem + "-transcript.txt"`) — written on
+  success *and* on a per-file failure, so the output folder alone is a
+  complete, auditable record of every input file's outcome (see ADR-0004).
+  The file is a `---`-delimited YAML frontmatter block followed by the
+  transcript body. On success:
   ```
-  On a per-file failure (missing file, unsupported extension, transcription
-  request failure or timeout, or no usable transcript):
-  ```json
-  {
-    "source_file": "audio.mp3",
-    "error": "no usable transcript for audio.mp3: transcription result contained no phrases"
-  }
+  ---
+  source_file: audio.mp3
+  ref: '123'
+  target: '5551234567'
+  associate: '5559876543'
+  direction: incoming
+  call_start: '2026-08-29 23:05:17'
+  duration: '00:00:35'
+  end_time: '2026-08-29 23:05:52'
+  classification: pertinent
+  call_progress: complete
+  language: English
+  monitor: null
+  text_message: null
+  ---
+  [0.0-2.5] Hello world
   ```
-- Resuming a run: before processing `FILE`, if `FILE.json` already exists and
-  holds a successful transcript (no `error` key), the file is skipped — no
-  Azure call is made. An error-echoing `FILE.json` from a prior run does
-  **not** count as done, so it's retried automatically. Pass `--clobber` to
-  reprocess every file regardless of any existing output. See ADR-0004.
+  On a per-file failure (missing file, unsupported extension, no matching
+  call record, transcription request failure or timeout, or no usable
+  transcript): the same frontmatter fields (`None` for any not yet known)
+  plus an `error` field, and no body:
+  ```
+  ---
+  source_file: audio.mp3
+  ref: null
+  ...
+  error: 'no usable transcript for audio.mp3: transcription result contained no phrases'
+  ---
+  ```
+- Resuming a run: before processing an entry, if its output already exists
+  and holds a successful transcript (no `error` key in the frontmatter), the
+  entry is skipped — no Azure call is made. An error-echoing output from a
+  prior run does **not** count as done, so it's retried automatically. Pass
+  `--clobber` to reprocess every entry regardless of any existing output. See
+  ADR-0004.
 
 ## Result → output-schema mapping (fast transcription)
-Azure's fast-transcription response carries `durationMilliseconds` and a
-`phrases` array of `{offsetMilliseconds, durationMilliseconds, text, locale}`.
-Map it as:
+Azure's fast-transcription response carries a `phrases` array of
+`{offsetMilliseconds, durationMilliseconds, text, locale}`. Map it as:
 - `source_file` ← the input file's name.
-- `language` ← the phrases' `locale` (or the requested locale).
-- `duration_seconds` ← `durationMilliseconds / 1000`.
-- `segments` ← one object per phrase: `{start: offsetMilliseconds/1000,
-  end: (offsetMilliseconds + durationMilliseconds)/1000, text}`, ordered by
-  non-decreasing `start`.
+- The frontmatter's `ref`, `target`, `associate`, `direction`, `call_start`,
+  `duration`, `end_time`, `classification`, `call_progress`, `language`,
+  `monitor`, `text_message` ← the matching call record (see ADR-0005),
+  `None` for any not yet known.
+- The body ← one line per phrase, `[start-end] text`, where
+  `start = offsetMilliseconds/1000`, `end = (offsetMilliseconds +
+  durationMilliseconds)/1000`, ordered by non-decreasing `start`.
 
 ## What we produce
 CLI
@@ -94,47 +121,59 @@ locally-run model. Both endpoints fall under ADR-0001's Azure provider decision;
 the fast-vs-batch split and its rationale are in ADR-0003.
 
 ## Done criteria (local/fast mode — current)
-1. `transcribe audio.mp3` (a valid, supported audio file) creates
-   `audio.mp3.json` with keys `source_file`, `language`, `duration_seconds`, and
-   `segments`; `segments` is a non-empty list of objects
-   `{start: number >= 0, end: number > start, text: non-empty string}`, ordered
-   by non-decreasing `start`. Exit code 0.
-2. `transcribe a.mp3 b.mp3` creates both `a.mp3.json` and `b.mp3.json`, each
-   independently satisfying criterion 1. Exit code 0.
-3. `transcribe missing.mp3`, where `missing.mp3` does not exist, exits with code
-   1, prints an error to stderr naming `missing.mp3`, and creates
-   `missing.mp3.json` containing `{"source_file": "missing.mp3", "error": ...}`
-   (see ADR-0004) — no partial or corrupt output file is ever written.
-4. `transcribe notes.txt`, where `notes.txt` exists but has an unsupported
-   extension, exits with code 1, prints an error to stderr mentioning
-   "unsupported" and the file extension, and creates `notes.txt.json` with an
-   `error` field mentioning "unsupported".
-5. `transcribe a.mp3 missing.mp3` (one valid, one missing) creates `a.mp3.json`
-   per criterion 1, prints the missing-file error for `missing.mp3` to stderr,
-   creates `missing.mp3.json` per criterion 3, and exits with code 1 overall.
-6. `transcribe` with no arguments exits with code 2 and prints a usage message
-   to stderr.
-7. `transcribe audio.mp3` with `AZURE_SPEECH_ENDPOINT` or `AZURE_SPEECH_KEY`
-   unset or empty exits with code 1, prints an error to stderr naming the
-   missing variable(s), makes no call to Azure, and creates no output file —
-   this failure aborts the whole run before the per-file loop starts, so there
-   is no single file to attach an error output to.
-8. `transcribe audio.mp3` where the fast-transcription call fails (raises or
-   returns an authentication or network error, or any non-2xx response) exits
-   with code 1, prints an error to stderr describing the failure, and creates
-   `audio.mp3.json` with an `error` field describing the failure.
-9. `transcribe audio.mp3` where the fast-transcription HTTP call exceeds a
-   configured request timeout exits with code 1, prints a timeout error to
-   stderr naming the file, and creates `audio.mp3.json` with an `error` field.
-10. `transcribe audio.mp3` where the call succeeds but returns no usable
-    transcript (e.g. an empty `phrases` list) exits with code 1, prints an error
-    to stderr describing the failure, and creates `audio.mp3.json` with an
-    `error` field describing the failure.
-11. `transcribe audio.mp3` run a second time, where `audio.mp3.json` already
-    holds a successful transcript from criterion 1, makes no call to Azure and
-    exits with code 0 (resumed/skipped). If `audio.mp3.json` instead holds an
-    error output from criterion 8, 9, or 10, the second run retries it — calls
-    Azure again and overwrites the output. `transcribe audio.mp3 --clobber`
+1. `transcribe --audiopath audio.mp3 --ref 123 --target 5551234567 --call-db calls.db`
+   (a valid, supported audio file; `ref`+`target` matching a row in
+   `calls.db`) creates `audio-transcript.txt`: a `---`-delimited YAML
+   frontmatter block with `source_file` plus the matching call record's
+   fields (see ADR-0005/ADR-0006), followed by a non-empty body of one line
+   per segment, `[start-end] text` with `start >= 0` and `end > start`. Exit
+   code 0.
+2. A `--manifest manifest.csv` run with two valid rows (`a.mp3`, `b.wav`,
+   each with a matching call record) creates both `a-transcript.txt` and
+   `b-transcript.txt`, each independently satisfying criterion 1. Exit code 0.
+3. An entry whose `audio_path` does not exist exits with code 1, prints an
+   error to stderr naming the missing file, and creates its
+   `FILE-transcript.txt` with `source_file` + an `error` field (see
+   ADR-0004) — no partial or corrupt output file is ever written.
+4. An entry whose `audio_path` exists but has an unsupported extension exits
+   with code 1, prints an error to stderr mentioning "unsupported" and the
+   file extension, and creates its output with an `error` field mentioning
+   "unsupported".
+5. A `--manifest` run with one valid entry and one missing-file entry
+   creates the valid entry's output per criterion 1, prints the missing-file
+   error to stderr, creates the failing entry's output per criterion 3, and
+   exits with code 1 overall.
+6. `transcribe` with no arguments, or with `--manifest` combined with
+   `--audiopath`/`--ref`/`--target`, or with only some of
+   `--audiopath`/`--ref`/`--target` given, exits with code 2 and prints a
+   usage message to stderr.
+7. A run with `AZURE_SPEECH_ENDPOINT` or `AZURE_SPEECH_KEY` unset or empty,
+   or with `--call-db` missing/unresolvable (no flag and no `CALL_DB_PATH`),
+   exits with code 1, prints an error to stderr naming the problem, makes no
+   call to Azure, and creates no output file — both failures abort the whole
+   run before the per-entry loop starts, so there is no single entry to
+   attach an error output to.
+8. An entry whose `ref`+`target` matches no row in the call database exits
+   with code 1, prints an error to stderr naming the ref/target, and creates
+   its output with `source_file` + an `error` field and every call-record
+   field `null` — no Azure call is made for that entry.
+9. An entry whose fast-transcription call fails (raises or returns an
+   authentication or network error, or any non-2xx response) exits with code
+   1, prints an error to stderr describing the failure, and creates its
+   output with an `error` field describing the failure (carrying the
+   call-record fields already found by that point).
+10. An entry whose fast-transcription HTTP call exceeds a configured request
+    timeout exits with code 1, prints a timeout error to stderr naming the
+    file, and creates its output with an `error` field.
+11. An entry whose call succeeds but returns no usable transcript (e.g. an
+    empty `phrases` list) exits with code 1, prints an error to stderr
+    describing the failure, and creates its output with an `error` field
+    describing the failure.
+12. Rerunning an entry whose output already holds a successful transcript
+    from criterion 1 makes no call to Azure and exits with code 0
+    (resumed/skipped). If the output instead holds an error from criterion
+    8, 9, 10, or 11, the second run retries it — calls Azure again (or
+    retries the lookup) and overwrites the output. Adding `--clobber`
     always reprocesses and overwrites, regardless of any existing output.
 
 ## Phase 2 (deferred): blob-staged batch mode

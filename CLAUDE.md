@@ -30,7 +30,8 @@ Cross-cutting concerns enabled for this project:
 │       ├── cli.py           # argument parsing, input-file validation
 │       ├── credentials.py   # Azure Speech credential loading
 │       ├── transcription.py # fast (synchronous) transcription HTTP call
-│       ├── transform.py     # result -> output schema, write FILE.json
+│       ├── call_lookup.py   # call-inventory SQLite lookup by ref+target
+│       ├── transform.py     # result -> frontmatter+body, write FILE-transcript.txt
 │       ├── errors.py        # exception hierarchy
 │       └── main.py          # CLI entrypoint / orchestration
 ├── tests/
@@ -45,7 +46,7 @@ in `pyproject.toml`), not a loose script — `uv run transcribe` is the entrypoi
 ```bash
 make setup                         # one-time: install deps + local Git hooks
 uv sync                            # install dependencies
-uv run transcribe FILE [FILE ...]  # run
+uv run transcribe --manifest data/manifest.csv --call-db path/to/quick-index.db  # run
 uv run pytest                      # test
 uv run ruff check .                # lint
 uv run ruff format .               # format
