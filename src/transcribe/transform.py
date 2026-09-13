@@ -1,55 +1,82 @@
-"""Transform Azure fast-transcription results into this project's output schema, and write them to disk."""
+"""Transform Azure fast-transcription results + a call record into TEXT-with-frontmatter output."""
 
-import json
 import os
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
 
+import yaml
+
+from .call_lookup import CallRecord
 from .errors import AppError, EmptyTranscriptionResultError, OutputWriteError
-from .transcription import DEFAULT_LOCALE
+
+_CALL_RECORD_FIELDS = (
+    "ref",
+    "target",
+    "associate",
+    "direction",
+    "call_start",
+    "duration",
+    "end_time",
+    "classification",
+    "call_progress",
+    "language",
+    "monitor",
+    "text_message",
+)
+Frontmatter = dict[str, str | None]
 
 
 class Segment(TypedDict):
-    """One timestamped transcript segment in the output schema."""
+    """One timestamped transcript segment used to render the body."""
 
     start: float
     end: float
     text: str
 
 
-class TranscriptOutput(TypedDict):
-    """The output schema written to `FILE.json` on success."""
+@dataclass(frozen=True)
+class TranscriptOutput:
+    """What gets written to `FILE-transcript.txt` on success: YAML frontmatter + a plain-text body."""
 
-    source_file: str
-    language: str
-    duration_seconds: float
-    segments: list[Segment]
+    frontmatter: Frontmatter
+    body: str
 
 
-class ErrorOutput(TypedDict):
-    """The output schema written to `FILE.json` when processing `source_file` fails.
+@dataclass(frozen=True)
+class ErrorOutput:
+    """What gets written to `FILE-transcript.txt` on a per-file failure (ADR-0004): frontmatter only."""
 
-    Written instead of `TranscriptOutput` so every input file ends up with
-    exactly one output file, auditable from the output folder alone even when
-    the run's stderr wasn't captured (see issue #18).
+    frontmatter: Frontmatter  # always includes "error"
+
+
+def _base_frontmatter(source_path: Path, call_record: CallRecord | None) -> Frontmatter:
+    """The call-record-derived frontmatter fields, in a fixed key order.
+
+    `source_file` always comes from `source_path` (kept for audit-trail
+    continuity with the prior JSON schema). Every other field comes from
+    `call_record` when a lookup succeeded, else `None` — e.g. a
+    `CallRecordNotFoundError` has no record to draw from.
     """
+    values = call_record._asdict() if call_record is not None else {}
+    frontmatter: Frontmatter = {"source_file": source_path.name}
+    frontmatter.update({field_name: values.get(field_name) for field_name in _CALL_RECORD_FIELDS})
+    return frontmatter
 
-    source_file: str
-    error: str
+
+def _render_body(segments: list[Segment]) -> str:
+    """Render timestamped segments as a human-readable plain-text transcript body."""
+    return "\n".join(f"[{segment['start']:.1f}-{segment['end']:.1f}] {segment['text']}" for segment in segments)
 
 
-def transform_result(
-    result: dict[str, Any],
-    source_path: Path,
-    requested_locale: str = DEFAULT_LOCALE,
-) -> TranscriptOutput:
-    """Transform a fast-transcription result into this project's output schema.
+def transform_result(result: dict[str, Any], source_path: Path, call_record: CallRecord) -> TranscriptOutput:
+    """Transform a fast-transcription result and its call record into this project's output schema.
 
     Args:
         result: the parsed fast-transcription result JSON.
         source_path: the input audio file the result belongs to.
-        requested_locale: the locale used as `language` when a phrase has none.
+        call_record: the matching call record, used to populate the frontmatter.
 
     Raises:
         EmptyTranscriptionResultError: if the result has no phrases (no usable transcript).
@@ -69,45 +96,78 @@ def transform_result(
         ),
         key=lambda segment: segment["start"],
     )
-
-    return TranscriptOutput(
-        source_file=source_path.name,
-        language=phrases[0].get("locale") or requested_locale,
-        duration_seconds=result["durationMilliseconds"] / 1000,
-        segments=segments,
-    )
+    return TranscriptOutput(frontmatter=_base_frontmatter(source_path, call_record), body=_render_body(segments))
 
 
-def build_error_output(source_path: Path, error: AppError) -> ErrorOutput:
-    """Build the error-echoing output written for `source_path` when processing it fails."""
-    return ErrorOutput(source_file=source_path.name, error=str(error))
+def build_error_output(source_path: Path, error: AppError, call_record: CallRecord | None = None) -> ErrorOutput:
+    """Build the error-echoing output written for `source_path` when processing it fails.
+
+    Carries any call-record fields already found before the failure (e.g. a
+    transcription error after a successful lookup), or all-`None` fields when
+    the lookup itself is what failed.
+    """
+    frontmatter = _base_frontmatter(source_path, call_record)
+    frontmatter["error"] = str(error)
+    return ErrorOutput(frontmatter=frontmatter)
 
 
 def output_path(source_path: Path) -> Path:
-    """The sibling `FILE.json` path that `source_path`'s output is written to."""
-    return source_path.with_name(source_path.name + ".json")
+    """The sibling `FILE-transcript.txt` path that `source_path`'s output is written to."""
+    return source_path.with_name(f"{source_path.stem}-transcript.txt")
+
+
+_FRONTMATTER_DELIMITER = "---\n"
+
+
+def _read_frontmatter(path: Path) -> Frontmatter:
+    """Parse the YAML frontmatter block from an existing `FILE-transcript.txt`.
+
+    Raises:
+        ValueError: if the file has no frontmatter block.
+    """
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith(_FRONTMATTER_DELIMITER):
+        raise ValueError(f"{path} has no frontmatter block")
+    _, _, rest = text.partition(_FRONTMATTER_DELIMITER)
+    block, _, _ = rest.partition(f"\n{_FRONTMATTER_DELIMITER}")
+    loaded = yaml.safe_load(block)
+    return loaded if isinstance(loaded, dict) else {}
 
 
 def has_existing_transcript(source_path: Path) -> bool:
     """Whether `source_path` already has a successful transcript on disk.
 
     Used to resume a run without re-transcribing files that already
-    succeeded. An error-echoing output (or an unreadable/corrupt file) does
-    not count as done, so a prior failure is retried on the next run.
+    succeeded. An error-echoing output (or a missing/unreadable/corrupt/malformed
+    file) does not count as done, so a prior failure is retried on the next run.
     """
     destination = output_path(source_path)
     if not destination.exists():
         return False
     try:
-        with destination.open(encoding="utf-8") as existing_file:
-            existing_output = json.load(existing_file)
-    except (OSError, json.JSONDecodeError):
+        frontmatter = _read_frontmatter(destination)
+    except (OSError, ValueError, yaml.YAMLError):
         return False
-    return "error" not in existing_output
+    return "error" not in frontmatter
 
 
-def write_transcript_json(output: TranscriptOutput | ErrorOutput, source_path: Path) -> Path:
-    """Atomically write `output` to `FILE.json`, a sibling of `source_path`.
+def _str_representer(dumper: yaml.SafeDumper, data: str) -> yaml.Node:
+    """Force multi-line string values (e.g. `text_message`) into block-literal style."""
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|" if "\n" in data else None)
+
+
+yaml.add_representer(str, _str_representer, Dumper=yaml.SafeDumper)
+
+
+def _render_output(output: TranscriptOutput | ErrorOutput) -> str:
+    """Render `output` as `---`-delimited YAML frontmatter, plus the body for a success."""
+    frontmatter_yaml = yaml.safe_dump(output.frontmatter, sort_keys=False, allow_unicode=True)
+    body = output.body if isinstance(output, TranscriptOutput) else ""
+    return f"{_FRONTMATTER_DELIMITER}{frontmatter_yaml}{_FRONTMATTER_DELIMITER}{body}"
+
+
+def write_transcript_txt(output: TranscriptOutput | ErrorOutput, source_path: Path) -> Path:
+    """Atomically write `output` to `FILE-transcript.txt`, a sibling of `source_path`.
 
     Writes to a temp file in the same directory and renames it into place with
     `os.replace`, so a mid-write failure never leaves a partial/corrupt destination file.
@@ -116,11 +176,12 @@ def write_transcript_json(output: TranscriptOutput | ErrorOutput, source_path: P
         OutputWriteError: if the write or the atomic rename fails.
     """
     destination = output_path(source_path)
+    text = _render_output(output)
     fd, tmp_name = tempfile.mkstemp(dir=destination.parent, prefix=f".{destination.name}.", suffix=".tmp")
     tmp_path = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
-            json.dump(output, tmp_file, indent=2)
+            tmp_file.write(text)
         os.replace(tmp_path, destination)
     except OSError as err:
         tmp_path.unlink(missing_ok=True)

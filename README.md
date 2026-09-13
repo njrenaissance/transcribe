@@ -11,7 +11,8 @@ A minimal Python project, managed with [uv](https://docs.astral.sh/uv/).
 │       ├── cli.py           # argument parsing, input-file validation
 │       ├── credentials.py   # Azure Speech credential loading
 │       ├── transcription.py # fast (synchronous) transcription HTTP call
-│       ├── transform.py     # result -> output schema, write FILE.json
+│       ├── call_lookup.py   # call-inventory SQLite lookup by ref+target
+│       ├── transform.py     # result -> frontmatter+body, write FILE-transcript.txt
 │       ├── errors.py        # exception hierarchy
 │       └── main.py          # CLI entrypoint / orchestration
 ├── tests/
@@ -83,14 +84,20 @@ regenerate-before-commit rule agents follow.
 ## Run
 
 ```bash
-uv run transcribe audio.mp3 [audio2.wav ...]
-uv run transcribe --manifest data/manifest.csv
+uv run transcribe --manifest data/manifest.csv --call-db path/to/quick-index.db
+uv run transcribe --audiopath audio.mp3 --ref 123 --target 5551234567 --call-db path/to/quick-index.db
 ```
 
-A file already holding a successful `FILE.json` transcript is skipped on a
-later run (no Azure call) — safe to re-run over a large manifest after an
-interruption. Pass `--clobber` to reprocess every file regardless of any
-existing output.
+`--manifest` reads a CSV with `ref`, `target`, and `audio_path` columns (batch
+mode); `--audiopath`/`--ref`/`--target` process one file as an explicit
+single request. Either way, `--call-db` (or the `CALL_DB_PATH` environment
+variable) points at call-inventory's SQLite index, used to look up each
+file's call record by `ref`+`target` for the output's frontmatter.
+
+A file already holding a successful `FILE-transcript.txt` transcript is
+skipped on a later run (no Azure call) — safe to re-run over a large manifest
+after an interruption. Pass `--clobber` to reprocess every file regardless of
+any existing output.
 
 ## Test
 
