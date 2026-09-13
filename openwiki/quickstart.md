@@ -1,32 +1,61 @@
 # transcribe — Quick Start
 
-**transcribe** is a Python CLI that transcribes local audio files into timestamped text using **Azure AI Speech**. It sends audio directly to Azure's fast (synchronous) transcription endpoint and outputs JSON with language, duration, and timestamped segments.
+**transcribe** is a Python CLI that transcribes local audio files using **Azure AI Speech**, producing SharePoint-ready text transcripts with call metadata. It sends audio directly to Azure's fast (synchronous) transcription endpoint and outputs plain-text files with YAML frontmatter containing call details.
 
-**Status:** Phase 1 (local fast transcription) — issues #6–#7 complete (validation), issues #8–#11 in progress (Azure transcription). Phase 2 (blob-staged batch) deferred; see `/spec/adr/0003-fast-transcription-for-local-files.md`.
+**Status:** Phase 1 complete (local fast transcription, call metadata lookup, SharePoint output format). Phase 2 (blob-staged batch) deferred; see `/spec/adr/0003-fast-transcription-for-local-files.md`.
 
 ## What it does
 
+**Single-file mode:**
 ```bash
-transcribe audio.mp3 interview.wav
+transcribe --ref CALL-001 --target 5551234567 --audiopath audio.mp3
+```
+
+**Batch mode (CSV manifest):**
+```bash
+transcribe --manifest manifest.csv --call-db calls.db
 ```
 
 For each input audio file:
-1. **Validate**: Check file exists and has a supported extension (`.mp3`, `.wav`)
+1. **Validate**: Check file exists, extension supported (`.mp3`, `.wav`), call database accessible
 2. **Load credentials**: Read `AZURE_SPEECH_ENDPOINT` and `AZURE_SPEECH_KEY` from environment
-3. **Transcribe**: POST file to Azure's fast transcription endpoint (`/speechtotext/transcriptions:transcribe`)
-4. **Output**: Write a sibling JSON file (`audio.mp3.json`) with timestamp segments
+3. **Look up call metadata**: Query the call-inventory SQLite database by `ref` and `target`
+4. **Transcribe**: POST file to Azure's fast transcription endpoint
+5. **Transform**: Build YAML frontmatter + timestamped transcript body
+6. **Output**: Write `{source_file}-transcript.txt` (or error output on failure)
 
-Output format:
-```json
-{
-  "source_file": "audio.mp3",
-  "language": "en",
-  "duration_seconds": 12.34,
-  "segments": [
-    {"start": 0.0, "end": 2.5, "text": "Hello world"}
-  ]
-}
+Output format (success):
 ```
+---
+source_file: audio.mp3
+ref: CALL-001
+target: 5551234567
+associate: 5559876543
+direction: Inbound
+call_start: "2024-01-15T14:30:00"
+duration: "00:02:15"
+end_time: "2024-01-15T14:32:15"
+classification: "Business"
+call_progress: "Completed"
+language: en
+monitor: "Agent 1"
+text_message: null
+---
+
+[0.0-2.5] Hello, this is the call center.
+[2.5-5.0] How can I assist you today?
+```
+
+**Error output** (when transcription or lookup fails):
+```
+---
+source_file: audio.mp3
+ref: CALL-001
+target: 5551234567
+error: "Transcription failed: timeout"
+---
+```
+Every input file always gets an output file (success or error), enabling resume and audit trailing.
 
 ## Quick Start
 
@@ -54,7 +83,19 @@ The outputs `speech_endpoint` and `speech_primary_key` feed the env vars above. 
 
 ### Run, test, lint
 ```bash
-uv run transcribe audio.mp3                   # Run the CLI
+# Single-file mode
+uv run transcribe --ref C001 --target 5551234567 --audiopath audio.mp3 --call-db calls.db
+
+# Batch mode
+uv run transcribe --manifest manifest.csv --call-db calls.db
+
+# Resume a partial run (skips files that already have successful output)
+uv run transcribe --manifest manifest.csv --call-db calls.db
+
+# Reprocess all files, even if they succeeded before
+uv run transcribe --manifest manifest.csv --call-db calls.db --clobber
+
+# Run tests and checks
 uv run pytest                                 # All tests
 make check                                    # Lint + type-check + tests
 ```
@@ -76,11 +117,12 @@ make check                                    # Lint + type-check + tests
 ├── src/
 │   └── transcribe/
 │       ├── main.py          # CLI entrypoint
-│       ├── cli.py           # Argument parsing, file validation
+│       ├── cli.py           # Argument parsing, file/database validation
 │       ├── credentials.py    # Azure credential loading
+│       ├── call_lookup.py    # Call metadata lookup from SQLite
 │       ├── errors.py        # Exception hierarchy
 │       ├── transcription.py  # Azure transcription calls
-│       └── transform.py      # Result transformation & output
+│       └── transform.py      # YAML frontmatter + body output
 ├── tests/
 │   ├── test_cli.py          # Unit: parsing, validation
 │   ├── test_credentials.py   # Unit: env var loading
@@ -107,14 +149,18 @@ make check                                    # Lint + type-check + tests
 
 | Path | What | Why |
 |------|------|-----|
-| `/spec/spec.md` | Specification | Complete input/output contracts, 10 done criteria, Phase 2 plan |
-| `/spec/adr/0003-fast-transcription-for-local-files.md` | Design decision | Why fast (sync) for local, batch deferred; rationale for two-mode design |
-| `/src/transcribe/main.py` | Entrypoint | CLI orchestration: parse → validate → transcribe → transform → write |
-| `/src/transcribe/cli.py` | Validation | Argument parsing; checks file exists, extension supported (.mp3, .wav) |
+| `/spec/spec.md` | Specification | Complete input/output contracts, done criteria, Phase 2 plan |
+| `/spec/adr/0003-fast-transcription-for-local-files.md` | Design decision | Why fast (sync) for local files |
+| `/spec/adr/0004-error-echoing-output-and-resume.md` | Design decision | Error output schema and `--clobber` resume flag |
+| `/spec/adr/0005-direct-sqlite-read-of-call-inventory-index.md` | Design decision | Call metadata lookup without `wireline` dependency |
+| `/spec/adr/0006-yaml-frontmatter-txt-output.md` | Design decision | YAML frontmatter + text body for SharePoint ingestion |
+| `/src/transcribe/main.py` | Entrypoint | CLI orchestration: parse → validate → transcribe → lookup → transform → write |
+| `/src/transcribe/cli.py` | Validation | Argument parsing (--manifest, --audiopath/--ref/--target, --call-db, --clobber); file/db validation |
+| `/src/transcribe/call_lookup.py` | Call metadata | SQLite query by ref+target; calls-table contract from call-inventory |
 | `/src/transcribe/transcription.py` | Transcription | HTTP POST to Azure fast endpoint; handles responses and errors |
-| `/src/transcribe/transform.py` | Output | Transforms Azure JSON into output schema; atomically writes FILE.json |
+| `/src/transcribe/transform.py` | Output | Builds YAML frontmatter + body; writes FILE-transcript.txt atomically; error handling |
 | `/src/transcribe/credentials.py` | Credential handling | Loads, validates `AZURE_SPEECH_*` env vars; raises if missing |
-| `/src/transcribe/errors.py` | Exceptions | Hierarchy: AppError, MissingFileError, CredentialError, TranscriptionError, EmptyTranscriptionResultError, OutputWriteError |
+| `/src/transcribe/errors.py` | Exceptions | Hierarchy: AppError subclasses for each failure mode (validation, transcription, lookup, I/O) |
 | `/infra/main.tf` | Infrastructure | Terraform: provisions Azure Cognitive Services Speech resource |
 | `/.github/workflows/ci.yml` | CI gate | Orchestrates lint → type-check → unit tests → integration tests |
 | `/CLAUDE.md` | Agent brief | Project profile, enabled/disabled features, standards imports |
@@ -125,8 +171,10 @@ make check                                    # Lint + type-check + tests
 - **Issue #6**: CLI argument validation (file existence, extension)
 - **Issue #7**: Azure credential validation (env var loading)
 - **Issue #8**: Fast-transcription request (POST file to Azure endpoint)
-- **Issue #10**: Output schema transformation and JSON file write
+- **Issue #10**: Output transformation and atomic file write
 - **Issue #11**: End-to-end orchestration and per-file error handling
+- **Issue #18**: Error-echoing output and resume via `--clobber`
+- **Issue #20**: Call metadata lookup and SharePoint-ready YAML+text output
 
 ### 📋 Deferred (Phase 2)
 - **Issue #9**: Batch polling (not for fast-transcription path)
