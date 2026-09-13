@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from .errors import ManifestError, MissingFileError, UnsupportedFileTypeError
+from .transform import DEFAULT_TIMESTAMP_FORMAT, validate_timestamp_format
 
 SUPPORTED_EXTENSIONS = {".mp3", ".wav"}
 _MANIFEST_COLUMNS = ("ref", "target", "audio_path")
@@ -38,6 +39,8 @@ class ParsedArgs(NamedTuple):
     entries: list[ManifestEntry]
     clobber: bool
     call_db: Path
+    destination: Path | None
+    timestamp_format: str
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -62,6 +65,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="reprocess files that already have a FILE-transcript.txt transcript instead of skipping them",
     )
+    parser.add_argument(
+        "--destination",
+        type=Path,
+        help=(
+            "write every transcript here instead of next to its source file "
+            "(named <ref>-<target>-<stem>-transcript.txt to avoid collisions)"
+        ),
+    )
+    parser.add_argument(
+        "--timestamp-format",
+        default=DEFAULT_TIMESTAMP_FORMAT,
+        help=f"time.strftime format for each segment's start/end timestamp (default: {DEFAULT_TIMESTAMP_FORMAT})",
+    )
     return parser
 
 
@@ -76,7 +92,8 @@ def parse_args(argv: list[str]) -> ParsedArgs:
     Exactly one of `--manifest` or the `--audiopath`/`--ref`/`--target` triple
     must be given; the triple must be given together or not at all. Exits
     with code 2 and a usage message on stderr (via argparse) for any other
-    combination, or when `--call-db` is missing.
+    combination, when `--call-db` is missing, or when `--timestamp-format`
+    isn't a valid `time.strftime` format.
 
     Raises:
         ManifestError: if `--manifest` is given but can't be read or is malformed.
@@ -93,13 +110,23 @@ def parse_args(argv: list[str]) -> ParsedArgs:
         parser.error("no input given: pass --manifest or --audiopath/--ref/--target")
     if args.call_db is None:
         parser.error(f"--call-db is required (or set {_CALL_DB_ENV_VAR})")
+    try:
+        validate_timestamp_format(args.timestamp_format)
+    except ValueError:
+        parser.error(f"invalid --timestamp-format {args.timestamp_format!r}: not a valid time.strftime format")
 
     entries = (
         read_manifest(args.manifest)
         if args.manifest is not None
         else [ManifestEntry(ref=args.ref, target=args.target, audio_path=args.audiopath)]
     )
-    return ParsedArgs(entries=entries, clobber=args.clobber, call_db=args.call_db)
+    return ParsedArgs(
+        entries=entries,
+        clobber=args.clobber,
+        call_db=args.call_db,
+        destination=args.destination,
+        timestamp_format=args.timestamp_format,
+    )
 
 
 def read_manifest(path: Path) -> list[ManifestEntry]:

@@ -11,6 +11,7 @@ from transcribe.transform import (
     has_existing_transcript,
     output_path,
     transform_result,
+    validate_timestamp_format,
     write_transcript_txt,
 )
 
@@ -19,9 +20,12 @@ _VALID_RESULT = {
     "phrases": [{"offsetMilliseconds": 0, "durationMilliseconds": 2500, "text": "Hello world", "locale": "en-US"}],
 }
 
+_REF = "123"
+_TARGET = "5551234567"
+
 _CALL_RECORD = CallRecord(
-    ref="123",
-    target="5551234567",
+    ref=_REF,
+    target=_TARGET,
     associate="5559876543",
     direction="incoming",
     call_start="2026-08-29 23:05:17",
@@ -48,6 +52,7 @@ _FRONTMATTER_KEY_ORDER = [
     "language",
     "monitor",
     "text_message",
+    "audio_duration",
     "detected_locales",
 ]
 
@@ -72,6 +77,7 @@ def test_transform_result_builds_frontmatter_from_call_record(tmp_path):
         "language": "English",
         "monitor": None,
         "text_message": None,
+        "audio_duration": 2500,
         "detected_locales": ["en-US"],
     }
 
@@ -98,7 +104,7 @@ def test_transform_result_renders_one_body_line_per_segment(tmp_path):
 
     output = transform_result(result, source_path, _CALL_RECORD)
 
-    assert output.body == "[0.0-2.0] First\n[2.0-5.0] Second"
+    assert output.body == "00:00:00 - 00:00:02 First\n00:00:02 - 00:00:05 Second"
 
 
 @pytest.mark.unit
@@ -114,7 +120,60 @@ def test_transform_result_sorts_segments_by_start_when_input_is_unordered(tmp_pa
 
     output = transform_result(result, source_path, _CALL_RECORD)
 
-    assert output.body == "[0.0-2.0] First\n[2.0-5.0] Second"
+    assert output.body == "00:00:00 - 00:00:02 First\n00:00:02 - 00:00:05 Second"
+
+
+@pytest.mark.unit
+def test_transform_result_uses_custom_timestamp_format(tmp_path):
+    source_path = tmp_path / "audio.mp3"
+    result = {
+        "durationMilliseconds": 2000,
+        "phrases": [{"offsetMilliseconds": 0, "durationMilliseconds": 2000, "text": "Hello"}],
+    }
+
+    output = transform_result(result, source_path, _CALL_RECORD, timestamp_format="%M:%S")
+
+    assert output.body == "00:00 - 00:02 Hello"
+
+
+@pytest.mark.unit
+def test_validate_timestamp_format_raises_on_an_invalid_directive():
+    with pytest.raises(ValueError):
+        validate_timestamp_format("%Q")
+
+
+@pytest.mark.unit
+def test_validate_timestamp_format_accepts_a_valid_format():
+    validate_timestamp_format("%H:%M:%S")
+
+
+@pytest.mark.unit
+def test_transform_result_renders_speaker_label_when_phrase_has_a_speaker(tmp_path):
+    source_path = tmp_path / "audio.mp3"
+    result = {
+        "durationMilliseconds": 5000,
+        "phrases": [
+            {"offsetMilliseconds": 0, "durationMilliseconds": 2000, "text": "Hi there", "speaker": 1},
+            {"offsetMilliseconds": 2000, "durationMilliseconds": 3000, "text": "Hello back", "speaker": 2},
+        ],
+    }
+
+    output = transform_result(result, source_path, _CALL_RECORD)
+
+    assert output.body == "00:00:00 - 00:00:02 Speaker 1: Hi there\n00:00:02 - 00:00:05 Speaker 2: Hello back"
+
+
+@pytest.mark.unit
+def test_transform_result_omits_speaker_label_when_phrase_has_no_speaker(tmp_path):
+    source_path = tmp_path / "audio.mp3"
+    result = {
+        "durationMilliseconds": 2000,
+        "phrases": [{"offsetMilliseconds": 0, "durationMilliseconds": 2000, "text": "Hello"}],
+    }
+
+    output = transform_result(result, source_path, _CALL_RECORD)
+
+    assert output.body == "00:00:00 - 00:00:02 Hello"
 
 
 @pytest.mark.unit
@@ -170,7 +229,7 @@ def test_write_transcript_txt_creates_sibling_file_with_correct_content(tmp_path
     source_path = tmp_path / "audio.mp3"
     output = transform_result(_VALID_RESULT, source_path, _CALL_RECORD)
 
-    destination = write_transcript_txt(output, source_path)
+    destination = write_transcript_txt(output, source_path, _REF, _TARGET)
 
     assert destination == tmp_path / "audio-transcript.txt"
     text = destination.read_text(encoding="utf-8")
@@ -180,13 +239,25 @@ def test_write_transcript_txt_creates_sibling_file_with_correct_content(tmp_path
 
 
 @pytest.mark.unit
+def test_write_transcript_txt_writes_to_destination_directory_when_given(tmp_path):
+    source_path = tmp_path / "source" / "audio.mp3"
+    destination_dir = tmp_path / "out"
+    output = transform_result(_VALID_RESULT, source_path, _CALL_RECORD)
+
+    destination = write_transcript_txt(output, source_path, _REF, _TARGET, destination_dir)
+
+    assert destination == destination_dir / f"{_REF}-{_TARGET}-audio-transcript.txt"
+    assert destination.exists()
+
+
+@pytest.mark.unit
 def test_write_transcript_txt_leaves_no_partial_file_on_replace_failure(mocker, tmp_path):
     source_path = tmp_path / "audio.mp3"
     output = transform_result(_VALID_RESULT, source_path, _CALL_RECORD)
     mocker.patch("transcribe.transform.os.replace", side_effect=OSError("disk full"))
 
     with pytest.raises(OutputWriteError):
-        write_transcript_txt(output, source_path)
+        write_transcript_txt(output, source_path, _REF, _TARGET)
 
     assert not (tmp_path / "audio-transcript.txt").exists()
     assert list(tmp_path.glob("*.tmp")) == []
@@ -197,7 +268,7 @@ def test_write_transcript_txt_accepts_error_output(tmp_path):
     source_path = tmp_path / "audio.mp3"
     output = build_error_output(source_path, MissingFileError(source_path))
 
-    destination = write_transcript_txt(output, source_path)
+    destination = write_transcript_txt(output, source_path, _REF, _TARGET)
 
     text = destination.read_text(encoding="utf-8")
     frontmatter_text = text.split("---\n", 2)[1]
@@ -245,45 +316,63 @@ def test_build_error_output_carries_partial_call_record(tmp_path):
 
 
 @pytest.mark.unit
-def test_output_path_returns_sibling_transcript_txt_path():
-    assert output_path(Path("dir/audio.mp3")) == Path("dir/audio-transcript.txt")
+def test_output_path_returns_sibling_transcript_txt_path_by_default():
+    assert output_path(Path("dir/audio.mp3"), _REF, _TARGET) == Path("dir/audio-transcript.txt")
+
+
+@pytest.mark.unit
+def test_output_path_uses_ref_target_stem_naming_when_destination_given():
+    destination = Path("out")
+    expected = destination / "123-5551234567-audio-transcript.txt"
+    assert output_path(Path("dir/audio.mp3"), _REF, _TARGET, destination) == expected
 
 
 @pytest.mark.unit
 def test_has_existing_transcript_false_when_no_output_file(tmp_path):
-    assert has_existing_transcript(tmp_path / "audio.mp3") is False
+    assert has_existing_transcript(tmp_path / "audio.mp3", _REF, _TARGET) is False
 
 
 @pytest.mark.unit
 def test_has_existing_transcript_true_for_successful_output(tmp_path):
     source_path = tmp_path / "audio.mp3"
-    write_transcript_txt(transform_result(_VALID_RESULT, source_path, _CALL_RECORD), source_path)
+    write_transcript_txt(transform_result(_VALID_RESULT, source_path, _CALL_RECORD), source_path, _REF, _TARGET)
 
-    assert has_existing_transcript(source_path) is True
+    assert has_existing_transcript(source_path, _REF, _TARGET) is True
+
+
+@pytest.mark.unit
+def test_has_existing_transcript_true_for_successful_output_in_destination_directory(tmp_path):
+    source_path = tmp_path / "source" / "audio.mp3"
+    destination_dir = tmp_path / "out"
+    write_transcript_txt(
+        transform_result(_VALID_RESULT, source_path, _CALL_RECORD), source_path, _REF, _TARGET, destination_dir
+    )
+
+    assert has_existing_transcript(source_path, _REF, _TARGET, destination_dir) is True
 
 
 @pytest.mark.unit
 def test_has_existing_transcript_false_for_error_output(tmp_path):
     source_path = tmp_path / "audio.mp3"
-    write_transcript_txt(build_error_output(source_path, MissingFileError(source_path)), source_path)
+    write_transcript_txt(build_error_output(source_path, MissingFileError(source_path)), source_path, _REF, _TARGET)
 
-    assert has_existing_transcript(source_path) is False
+    assert has_existing_transcript(source_path, _REF, _TARGET) is False
 
 
 @pytest.mark.unit
 def test_has_existing_transcript_false_for_file_with_no_frontmatter_block(tmp_path):
     source_path = tmp_path / "audio.mp3"
-    output_path(source_path).write_text("not frontmatter at all", encoding="utf-8")
+    output_path(source_path, _REF, _TARGET).write_text("not frontmatter at all", encoding="utf-8")
 
-    assert has_existing_transcript(source_path) is False
+    assert has_existing_transcript(source_path, _REF, _TARGET) is False
 
 
 @pytest.mark.unit
 def test_has_existing_transcript_false_for_malformed_yaml(tmp_path):
     source_path = tmp_path / "audio.mp3"
-    output_path(source_path).write_text("---\nkey: [unterminated\n---\nbody", encoding="utf-8")
+    output_path(source_path, _REF, _TARGET).write_text("---\nkey: [unterminated\n---\nbody", encoding="utf-8")
 
-    assert has_existing_transcript(source_path) is False
+    assert has_existing_transcript(source_path, _REF, _TARGET) is False
 
 
 @pytest.mark.unit
@@ -292,7 +381,7 @@ def test_write_transcript_txt_renders_multiline_text_message_as_block_literal(tm
     call_record = _CALL_RECORD._replace(text_message="line one\nline two")
     output = transform_result(_VALID_RESULT, source_path, call_record)
 
-    destination = write_transcript_txt(output, source_path)
+    destination = write_transcript_txt(output, source_path, _REF, _TARGET)
 
     text = destination.read_text(encoding="utf-8")
     assert "text_message: |-\n" in text or "text_message: |\n" in text
