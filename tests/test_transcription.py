@@ -4,7 +4,12 @@ import httpx
 import pytest
 
 from transcribe.credentials import AzureCredentials
-from transcribe.errors import LanguageNotIdentifiedError, TranscriptionError, TranscriptionTimeoutError
+from transcribe.errors import (
+    LanguageNotIdentifiedError,
+    MultipleLanguagesIdentifiedError,
+    TranscriptionError,
+    TranscriptionTimeoutError,
+)
 from transcribe.transcription import CANDIDATE_LOCALES, transcribe_file
 
 _CREDENTIALS = AzureCredentials(endpoint="https://example.cognitiveservices.azure.com", key="secret-key")
@@ -105,6 +110,26 @@ def test_transcribe_file_raises_language_not_identified_on_no_language_identifie
     mocker.patch("transcribe.transcription.httpx.post", return_value=response)
 
     with pytest.raises(LanguageNotIdentifiedError, match="audio.wav"):
+        transcribe_file(audio_path, _CREDENTIALS)
+
+
+@pytest.mark.unit
+def test_transcribe_file_raises_multiple_languages_identified_on_ambiguous_response(mocker, tmp_path):
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"fake-audio-bytes")
+    request = httpx.Request("POST", "https://example.com")
+    body = {
+        "code": "UnprocessableEntity",
+        "message": "Multiple languages were identified. A single dominant language could not be determined.",
+        "innerError": {
+            "code": "MultipleLanguagesIdentified",
+            "message": "Multiple languages were identified. A single dominant language could not be determined.",
+        },
+    }
+    response = httpx.Response(422, json=body, request=request)
+    mocker.patch("transcribe.transcription.httpx.post", return_value=response)
+
+    with pytest.raises(MultipleLanguagesIdentifiedError, match="audio.wav"):
         transcribe_file(audio_path, _CREDENTIALS)
 
 

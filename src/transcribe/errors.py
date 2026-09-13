@@ -64,6 +64,21 @@ class LanguageNotIdentifiedError(AppError):
         self.path = path
 
 
+class MultipleLanguagesIdentifiedError(AppError):
+    """Raised when Azure identifies more than one language with no single dominant one (issue #21).
+
+    Confirmed live via Azure's 422 `MultipleLanguagesIdentified` response —
+    genuinely mixed-language audio (e.g. code-switching) where language
+    identification can't settle on one locale to transcribe the whole file
+    against. Distinct from `LanguageNotIdentifiedError`, which is too little
+    signal rather than too much ambiguity.
+    """
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(f"multiple languages identified with no single dominant one for {path}")
+        self.path = path
+
+
 class OutputWriteError(AppError):
     """Raised when writing the transcript output JSON file fails."""
 
