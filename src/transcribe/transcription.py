@@ -7,7 +7,13 @@ from typing import Any
 import httpx
 
 from .credentials import AzureCredentials
-from .errors import LanguageNotIdentifiedError, TranscriptionError, TranscriptionTimeoutError
+from .errors import (
+    AppError,
+    LanguageNotIdentifiedError,
+    MultipleLanguagesIdentifiedError,
+    TranscriptionError,
+    TranscriptionTimeoutError,
+)
 
 _API_VERSION = "2025-10-15"
 _DEFAULT_TIMEOUT_SECONDS = 60.0
@@ -25,25 +31,34 @@ _PROFANITY_FILTER_MODE = "None"
 # speakers said it.
 _MAX_SPEAKERS = 2
 _NO_LANGUAGE_IDENTIFIED_CODE = "NoLanguageIdentified"
+_MULTIPLE_LANGUAGES_IDENTIFIED_CODE = "MultipleLanguagesIdentified"
+# Errors Azure's language identification (see CANDIDATE_LOCALES) can return as
+# a 422 instead of a successful result, mapped to the domain error each means.
+_LANGUAGE_IDENTIFICATION_ERRORS = {
+    _NO_LANGUAGE_IDENTIFIED_CODE: LanguageNotIdentifiedError,
+    _MULTIPLE_LANGUAGES_IDENTIFIED_CODE: MultipleLanguagesIdentifiedError,
+}
 _UNPROCESSABLE_ENTITY_STATUS = 422
 _AUDIO_CONTENT_TYPES = {".mp3": "audio/mpeg", ".wav": "audio/wav"}
 _DEFAULT_AUDIO_CONTENT_TYPE = "application/octet-stream"
 
 
-def _is_no_language_identified(response: httpx.Response) -> bool:
-    """Whether `response` is Azure's 422 `NoLanguageIdentified` response.
+def _language_identification_error(response: httpx.Response) -> type[AppError] | None:
+    """The domain error class for `response`, if it's a known language-identification 422.
 
-    Confirmed live (issue #21): on very short or low-signal audio, language
-    identification among `CANDIDATE_LOCALES` can fail outright with a 422,
-    rather than the request succeeding with no usable phrases.
+    Confirmed live (issue #21): on very short/low-signal audio, or on audio
+    with no single dominant language among `CANDIDATE_LOCALES`, language
+    identification can fail outright with a 422 rather than the request
+    succeeding with no (or ambiguous) usable phrases.
     """
     if response.status_code != _UNPROCESSABLE_ENTITY_STATUS:
-        return False
+        return None
     try:
         body = response.json()
     except json.JSONDecodeError:
-        return False
-    return bool(body.get("innerError", {}).get("code") == _NO_LANGUAGE_IDENTIFIED_CODE)
+        return None
+    code = body.get("innerError", {}).get("code")
+    return _LANGUAGE_IDENTIFICATION_ERRORS.get(code)
 
 
 def transcribe_file(
@@ -67,6 +82,9 @@ def transcribe_file(
         LanguageNotIdentifiedError: if Azure can't identify a locale among
             `CANDIDATE_LOCALES` for the audio (its 422 `NoLanguageIdentified`
             response).
+        MultipleLanguagesIdentifiedError: if Azure identifies more than one
+            language with no single dominant one (its 422
+            `MultipleLanguagesIdentified` response).
         TranscriptionError: on an authentication failure, any other non-2xx
             response, or a network error.
         TranscriptionTimeoutError: if the request exceeds `timeout`.
@@ -92,8 +110,9 @@ def transcribe_file(
     except httpx.TimeoutException as err:
         raise TranscriptionTimeoutError(path, timeout) from err
     except httpx.HTTPStatusError as err:
-        if _is_no_language_identified(err.response):
-            raise LanguageNotIdentifiedError(path) from err
+        language_error = _language_identification_error(err.response)
+        if language_error is not None:
+            raise language_error(path) from err
         reason = f"HTTP {err.response.status_code} {err.response.reason_phrase}"
         raise TranscriptionError(path, reason) from err
     except httpx.HTTPError as err:
