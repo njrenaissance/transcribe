@@ -4,32 +4,46 @@ For authoritative functional requirements, input/output schemas, and done criter
 
 This page summarizes the key requirements and links to design decisions.
 
-## Current phase: Local files via fast transcription
+## Current phase: Local files via fast transcription with call metadata
 
-**Status:** In progress (issues #6, #7 done; #8, #10, #11 in progress)
+**Status:** Complete (issues #6–8, #10–11, #18, #20 done)
 
-**Scope:** Transcribe local audio files using Azure AI Speech's synchronous (fast) endpoint. No intermediate storage, no polling — transcript returned inline.
+**Scope:** Transcribe local audio files using Azure AI Speech's synchronous (fast) endpoint. Enrich transcripts with call metadata from a call-inventory SQLite database. Output SharePoint-ready text files with YAML frontmatter. Support resume via `--clobber` for partial re-runs and error auditing.
 
 ## Input/Output contract
 
 ### Input
 
-**Command line:**
+**Command line — single-file mode:**
 ```bash
-transcribe audio.mp3 interview.wav notes.m4a
+transcribe --ref CALL-001 --target 5551234567 --audiopath audio.mp3 --call-db calls.db
 ```
 
-- One or more file paths as positional arguments
-- Paths can be absolute or relative
+- `--ref`: Call reference number (string, required)
+- `--target`: Target phone number (string, required)
+- `--audiopath`: Path to audio file (local path or URL; only local files supported today)
+- `--call-db`: Path to call-inventory SQLite database (required)
+- `--clobber`: Force reprocess even if output exists (optional, see resume behavior below)
+
+**Command line — batch mode:**
+```bash
+transcribe --manifest manifest.csv --call-db calls.db [--clobber]
+```
+
+- `--manifest`: Path to CSV file with columns `ref`, `target`, `audio_path` (required)
+- `--call-db`: Path to call-inventory SQLite database (required)
+- `--clobber`: Force reprocess all files (optional)
 
 **Environment:**
 ```bash
 export AZURE_SPEECH_ENDPOINT=https://your-region.cognitiveservices.azure.com/
 export AZURE_SPEECH_KEY=your-api-key
+export CALL_DB_PATH=/path/to/calls.db  # Optional; --call-db takes precedence
 ```
 
 - Required: `AZURE_SPEECH_ENDPOINT` (non-empty)
 - Required: `AZURE_SPEECH_KEY` (non-empty)
+- Optional: `CALL_DB_PATH` (used if `--call-db` not provided)
 
 ### Output
 
@@ -40,57 +54,101 @@ export AZURE_SPEECH_KEY=your-api-key
 
 **Files written:**
 ```bash
-$ transcribe audio.mp3
-$ ls -la audio.mp3*
+$ transcribe --ref C001 --target 5551234567 --audiopath audio.mp3 --call-db calls.db
+$ ls -la audio*
 -rw-r--r--  audio.mp3
--rw-r--r--  audio.mp3.json
+-rw-r--r--  audio-transcript.txt
 ```
 
-**Output schema** (one JSON file per input audio file, named `{input}.json`):
-```json
-{
-  "source_file": "audio.mp3",
-  "language": "en",
-  "duration_seconds": 12.34,
-  "segments": [
-    {"start": 0.0, "end": 2.5, "text": "Hello world"},
-    {"start": 2.5, "end": 5.0, "text": "How are you?"}
-  ]
-}
+**Output schema — success** (`{stem}-transcript.txt` with YAML frontmatter + body):
+```
+---
+source_file: audio.mp3
+ref: CALL-001
+target: 5551234567
+associate: 5559876543
+direction: Inbound
+call_start: "2024-01-15T14:30:00"
+duration: "00:02:15"
+end_time: "2024-01-15T14:32:15"
+classification: Business
+call_progress: Completed
+language: en
+monitor: "Agent 1"
+text_message: null
+---
+
+[0.0-2.5] Hello, this is the call center.
+[2.5-5.0] How can I assist you today?
+[5.0-7.5] I'm looking for information about...
 ```
 
-**Fields:**
-- `source_file` (string): Input file's name (basename, not full path)
-- `language` (string): Locale inferred from transcription (e.g. "en", "es")
-- `duration_seconds` (float): Total audio duration in seconds
-- `segments` (array): List of transcribed phrases with timing
-  - `start` (float): Segment start time in seconds, >= 0
-  - `end` (float): Segment end time in seconds, > start
-  - `text` (string): Transcribed text, non-empty
+**Frontmatter fields:**
+- `source_file` (string): Input file's basename (audit trail continuity)
+- `ref` (string | null): Call reference number from manifest/--ref
+- `target` (string | null): Target phone number from manifest/--target
+- `associate`, `direction`, `call_start`, `duration`, `end_time`, `classification`, `call_progress`, `language`, `monitor`, `text_message` (all strings or null): Call record fields from the SQLite lookup
+
+**Body format:**
+- One line per segment: `[start-end] text`
+- Times in seconds, 0.1 precision
+- Empty if the file had no phrases or if the call record was not found (but frontmatter always populated with source_file + null fields)
+
+**Output schema — failure** (`{stem}-transcript.txt` with YAML frontmatter only, no body):
+```
+---
+source_file: audio.mp3
+ref: CALL-001
+target: 5551234567
+error: "Transcription failed: Azure timeout after 30s"
+---
+```
+
+- `error` field describes the failure: file not found, unsupported extension, transcription failure, call lookup failure, output write failure, etc.
+- **Every input file gets exactly one output file**, success or failure. This is the "error-echoing output" contract (ADR-0004).
+
+**Resume behavior:**
+- Before processing each file, the tool checks if `{stem}-transcript.txt` already exists
+- If it parses as YAML with no `error` key, the file is skipped (already succeeded)
+- If it has an `error` key or is missing/unreadable/corrupt, the file is retried
+- `--clobber` forces reprocessing all files regardless of existing output
+- This design enables resuming partial batch runs without re-calling Azure for already-successful files
 
 **stderr output:**
 ```bash
-$ transcribe missing.mp3 unsupported.txt
+$ transcribe --ref C001 --target 5551234567 --audiopath missing.mp3 --call-db calls.db
 Error: file not found: missing.mp3
-Error: unsupported file extension '.txt': unsupported.txt
 ```
 
 - One error message per failure
-- All failures reported before exit
+- All failures reported to stderr before exit
+- Exit code is still 1 (failure), but the `{stem}-transcript.txt` file also has an `error` key for audit trailing
 
-## File validation requirements
+## Input validation requirements
 
-**Supported file types:**
+**Supported audio file types:**
 - `.mp3` (MPEG-3 audio)
 - `.wav` (Waveform Audio)
 - Extensions are case-insensitive: `.MP3`, `.WAV`, `.mp3`, `.wav` all accepted
 
-**Validation order:**
-1. CLI argument parsing (must have at least one argument)
-2. File existence (each file must exist on disk)
-3. File extension (must be `.mp3` or `.wav`)
+**Argument validation:**
+1. Exactly one of `--manifest` or the `--audiopath`/`--ref`/`--target` triple must be provided
+2. If manifest mode: CSV file must exist and be readable, columns must be `ref`, `target`, `audio_path`
+3. If single-file mode: all three of `--audiopath`, `--ref`, `--target` must be non-empty
+4. Call database (`--call-db` or `CALL_DB_PATH`) must exist and be readable
 
-**Validation happens before any Azure calls.** If any file is invalid, report the error(s) to stderr and exit 1 without making any transcription requests.
+**File validation (per-file, during processing):**
+1. Audio file must exist on disk (local files only; URLs not supported today)
+2. Audio file extension must be `.mp3` or `.wav`
+
+**Validation order:**
+1. Parse and validate CLI arguments (fail fast, exit code 2 if invalid)
+2. Load credentials
+3. Load and parse manifest (if batch mode)
+4. For each file: validate file exists and has supported extension
+5. Run transcription, lookup, and output for each file
+
+**Failures:** Argument or credential validation errors abort the whole run (exit code 1) before the per-file loop. Per-file failures (missing file, unsupported type, transcription error, lookup error, write error) are caught inside the loop, an error-echoing output file is written for that file, and the run continues with the next file.
 
 ## Credential validation requirements
 
@@ -115,7 +173,35 @@ Error: unsupported file extension '.txt': unsupported.txt
 
 **Credentials are validated before transcription.** If validation fails, report error to stderr and exit 1 without calling Azure.
 
-## Transcription requirements (issue #8, in progress)
+## Call metadata lookup requirements (issue #20)
+
+**Data source:** SQLite database produced by `call-inventory` project (see `/spec/adr/0005-direct-sqlite-read-of-call-inventory-index.md`).
+
+**Lookup:**
+- Query the `calls` table by `(ref, target)` key
+- `target` is digits-normalized before lookup (any non-digits stripped)
+- Return the first matching row by ID (or null if no match)
+
+**Fields used in output:**
+- `ref`: Call reference number
+- `target`: Target phone number
+- `associate`: Associated number
+- `direction`: Call direction (inbound/outbound)
+- `call_start`: Call start timestamp
+- `duration`: Call duration string
+- `end_time`: Call end timestamp
+- `classification`: Call classification
+- `call_progress`: Call progress/outcome
+- `language`: Language of the call
+- `monitor`: Monitoring/recording agent
+- `text_message`: Associated text message body (if any)
+
+**Error handling:**
+- If database cannot be opened: `CallDbError`, caught at startup, run aborts
+- If lookup returns no matching row: `CallRecordNotFoundError`, caught per-file, error-echoing output written with all call fields set to null
+- If database query fails: `CallDbError`, caught per-file, error-echoing output written
+
+## Transcription requirements (issue #8)
 
 **Azure endpoint:**
 ```
@@ -151,51 +237,48 @@ POST /cognitiveservices/v1/speechtotext/transcriptions:transcribe?api-version=20
 ```
 
 **Error handling:**
-- Non-2xx response: Report to stderr, exit 1, do not create output file
-- Network timeout (configurable, default TBD): Report to stderr, exit 1
-- Empty phrases list: Report to stderr, exit 1
-- Auth failure (401, 403): Report to stderr, exit 1
+- Non-2xx response: `TranscriptionError`, caught per-file, error-echoing output written
+- Network timeout (default 30s): `TranscriptionTimeoutError`, caught per-file, error-echoing output written
+- Empty phrases list: `EmptyTranscriptionResultError`, caught per-file, error-echoing output written
+- Auth failure (401, 403): `TranscriptionError`, caught per-file, error-echoing output written
 
-## Output transformation requirements (issue #10, in progress)
+## Output transformation requirements (issue #10 + issue #20)
 
-**Azure response → output schema mapping:**
+**YAML frontmatter:** Built from call record fields (all required fields present, even if null):
+- `source_file`: Input file's basename
+- `ref`, `target`, `associate`, `direction`, `call_start`, `duration`, `end_time`, `classification`, `call_progress`, `language`, `monitor`, `text_message`: From call record (or null if lookup failed)
+- On error: add `error` field with failure message; omit body
 
-| Azure field | Output field | Transform |
-|---|---|---|
-| `durationMilliseconds` | `duration_seconds` | Divide by 1000 |
-| `phrases[].locale` | `language` | Use as-is (e.g., "en-US" → "en") |
-| `phrases[].offsetMilliseconds` | `segment.start` | Convert to seconds: offset / 1000 |
-| `phrases[].offsetMilliseconds + durationMilliseconds` | `segment.end` | Convert to seconds: (offset + duration) / 1000 |
-| `phrases[].text` | `segment.text` | Use as-is |
-| (input filename) | `source_file` | Use as-is (basename) |
+**Transcript body:** Rendered from Azure phrases
+- One line per segment: `[start-end] text`
+- Times in seconds, 0.1 precision
+- If no phrases (empty transcript): only frontmatter, no error (output file still created for audit trailing; call frontmatter still populated)
 
-**Segment ordering:**
-- Segments must be ordered by non-decreasing start time
-- Typically already in order from Azure, but validate/sort if needed
+**Atomic write:**
+- Write to temp file in same directory as output, then rename into place
+- Ensures partial/corrupt writes never leave broken output
+- Failure to write raises `OutputWriteError`, caught per-file, error-echoing output attempted (but may fail if directory is unwritable)
 
-**Empty transcript handling:**
-- If `phrases` is empty or missing: Error condition, exit 1, do not write output file
+## Done criteria
 
-## Done criteria (from spec.md)
+**Exit code 0 (all files succeeded):**
+1. ✓ Single file: `transcribe --audiopath audio.mp3 --ref C001 --target 5551234567 --call-db calls.db` creates `audio-transcript.txt` with YAML + body
+2. ✓ Batch manifest: `transcribe --manifest manifest.csv --call-db calls.db` creates `{stem}-transcript.txt` for each row
+3. ✓ Resume/skip: Re-running the same manifest skips files with successful `{stem}-transcript.txt` (no `error` key)
+4. ✓ Clobber: `--clobber` flag forces reprocessing all files regardless of existing output
 
-**Exit code 0 (success):**
-1. ✓ Single file: `transcribe audio.mp3` creates `audio.mp3.json` with correct schema, valid segments
-2. ✓ Multiple files: `transcribe a.mp3 b.mp3` creates both `a.mp3.json` and `b.mp3.json`
-
-**Exit code 1 (validation errors):**
-3. ✓ Missing file: `transcribe missing.mp3` → error to stderr, no output file
-4. ✓ Unsupported type: `transcribe notes.txt` → error to stderr, no output file
-5. ✓ Mixed valid/invalid: `transcribe a.mp3 missing.wav` → error for missing file, but still write `a.mp3.json`
-6. ✓ Credential error: `transcribe audio.mp3` (credentials unset) → error to stderr, no output file
-7. ✓ Transcription error: Azure returns non-2xx or error response → error to stderr, no output file
+**Exit code 1 (some or all files failed):**
+5. ✓ Missing file: `transcribe --audiopath missing.mp3 ... --call-db calls.db` → error to stderr, `missing-transcript.txt` with error field written
+6. ✓ Unsupported type: `transcribe --audiopath notes.txt ... --call-db calls.db` → error to stderr, `notes-transcript.txt` with error field written
+7. ✓ Mixed valid/invalid: Batch with one missing file → errors to stderr for missing file, but `{stem}-transcript.txt` written for all files (success or error)
+8. ✓ Credential error: `transcribe ...` (credentials unset) → error to stderr, no files processed
+9. ✓ Call DB missing/unreadable: Invalid `--call-db` or bad database → error to stderr, no files processed
+10. ✓ Transcription error: Azure returns non-2xx → error to stderr, error-echoing `{stem}-transcript.txt` written
+11. ✓ Empty transcript: Azure returns empty phrases → no body in output, but `{stem}-transcript.txt` written with frontmatter
+12. ✓ Call lookup failure: No matching call record → `{stem}-transcript.txt` written with all call fields null but transcript body present
 
 **Exit code 2 (usage error):**
-8. ✓ No arguments: `transcribe` → usage message to stderr (automatic via argparse)
-
-**Current progress:**
-- ✓ Done: #1, #3, #4, #6, #8 (usage)
-- 🔄 In progress: #2, #5, #7
-- ⏳ Deferred: #9 (batch polling, Phase 2)
+13. ✓ Invalid arguments: `--audiopath` without `--ref`/`--target`, or `--manifest` with `--audiopath`, etc. → usage message to stderr (automatic via argparse)
 
 ## Phase 2 (deferred): Blob-staged batch transcription
 
