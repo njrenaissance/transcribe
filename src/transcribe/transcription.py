@@ -1,4 +1,4 @@
-"""Azure fast (synchronous) transcription for local audio files."""
+"""Azure fast (synchronous) transcription for local audio files, with per-utterance language identification."""
 
 import json
 from pathlib import Path
@@ -11,7 +11,11 @@ from .errors import TranscriptionError, TranscriptionTimeoutError
 
 _API_VERSION = "2025-10-15"
 _DEFAULT_TIMEOUT_SECONDS = 60.0
-DEFAULT_LOCALE = "en-US"
+# Candidate locales for Azure's per-utterance language identification (issue #21):
+# passing more than one locale here makes the fast-transcription endpoint pick the
+# best-matching candidate per phrase (reported back as that phrase's `locale`)
+# instead of forcing every phrase into a single fixed locale.
+CANDIDATE_LOCALES = ("en-US", "es-US")
 _AUDIO_CONTENT_TYPES = {".mp3": "audio/mpeg", ".wav": "audio/wav"}
 _DEFAULT_AUDIO_CONTENT_TYPE = "application/octet-stream"
 
@@ -41,7 +45,7 @@ def transcribe_file(
     url = f"{credentials.endpoint}/speechtotext/transcriptions:transcribe?api-version={_API_VERSION}"
     headers = {"Ocp-Apim-Subscription-Key": credentials.key}
     audio_content_type = _AUDIO_CONTENT_TYPES.get(path.suffix.lower(), _DEFAULT_AUDIO_CONTENT_TYPE)
-    definition = json.dumps({"locales": [DEFAULT_LOCALE]}).encode("utf-8")
+    definition = json.dumps({"locales": list(CANDIDATE_LOCALES)}).encode("utf-8")
     files = {
         "audio": (path.name, path.read_bytes(), audio_content_type),
         "definition": (None, definition, "application/json"),

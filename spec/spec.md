@@ -46,9 +46,13 @@ provider decision in ADR-0001.
      (`.../speechtotext/transcriptions:transcribe?api-version=2025-10-15`) as
      `multipart/form-data` with an `audio` part (the file bytes) and a
      `definition` part (JSON: `locales`, etc.), authenticated with the
-     `Ocp-Apim-Subscription-Key` header. The response body **is** the
-     transcription result JSON — there is no job URL, polling, or separate
-     download.
+     `Ocp-Apim-Subscription-Key` header. `locales` carries every candidate in
+     `transcription.CANDIDATE_LOCALES` (currently `en-US`, `es-US`), so Azure
+     performs per-phrase language identification among them in this same
+     request rather than assuming a single fixed locale (see
+     `spec/adr/0007-multi-locale-language-identification.md`). The response
+     body **is** the transcription result JSON — there is no job URL,
+     polling, or separate download.
   5. Transform the result and call record into this spec's output schema
      (below) and write it to `FILE-transcript.txt`.
 - Output: for each input file, exactly one sibling text file
@@ -72,9 +76,15 @@ provider decision in ADR-0001.
   language: English
   monitor: null
   text_message: null
+  detected_locales:
+  - en-US
   ---
   [0.0-2.5] Hello world
   ```
+  `detected_locales` is the distinct, sorted set of locales Azure's language
+  identification reported across the file's phrases (empty if none reported
+  one) — separate from the call record's own `language` field. See
+  ADR-0007.
   On a per-file failure (missing file, unsupported extension, no matching
   call record, transcription request failure or timeout, or no usable
   transcript): the same frontmatter fields (`None` for any not yet known)
@@ -96,12 +106,16 @@ provider decision in ADR-0001.
 
 ## Result → output-schema mapping (fast transcription)
 Azure's fast-transcription response carries a `phrases` array of
-`{offsetMilliseconds, durationMilliseconds, text, locale}`. Map it as:
+`{offsetMilliseconds, durationMilliseconds, text, locale}` (`locale` is the
+per-phrase language-identification result among `CANDIDATE_LOCALES`, and may
+be absent — see ADR-0007). Map it as:
 - `source_file` ← the input file's name.
 - The frontmatter's `ref`, `target`, `associate`, `direction`, `call_start`,
   `duration`, `end_time`, `classification`, `call_progress`, `language`,
   `monitor`, `text_message` ← the matching call record (see ADR-0005),
   `None` for any not yet known.
+- The frontmatter's `detected_locales` ← the distinct, sorted `locale` values
+  present across `phrases` (`[]` if none report one).
 - The body ← one line per phrase, `[start-end] text`, where
   `start = offsetMilliseconds/1000`, `end = (offsetMilliseconds +
   durationMilliseconds)/1000`, ordered by non-decreasing `start`.
@@ -175,6 +189,15 @@ the fast-vs-batch split and its rationale are in ADR-0003.
     8, 9, 10, or 11, the second run retries it — calls Azure again (or
     retries the lookup) and overwrites the output. Adding `--clobber`
     always reprocesses and overwrites, regardless of any existing output.
+13. An entry whose audio is in a non-English `CANDIDATE_LOCALES` candidate
+    (e.g. Spanish) is transcribed correctly — its output's body contains the
+    correctly-recognized (not garbled or empty) text, and its frontmatter's
+    `detected_locales` includes that locale (e.g. `es-US`), not just
+    `en-US`. See ADR-0007.
+14. An entry whose fast-transcription result has usable phrases but none of
+    them report a `locale` still succeeds per criterion 1 — its
+    `detected_locales` is `[]`, and this is not treated as a failure (see
+    ADR-0007).
 
 ## Phase 2 (deferred): blob-staged batch mode
 Not yet built; kept here so the second mode isn't lost. When built:
@@ -192,4 +215,5 @@ Not yet built; kept here so the second mode isn't lost. When built:
 - Batch-specific done criteria then apply: job reaching `Failed` status →
   exit 1 with Azure's failure reason; job stuck past the poll timeout → exit 1
   with a timeout error; result listing/download failing or returning no
-  `Transcription`-kind file → exit 1. Each leaves no `FILE.json` behind.
+  `Transcription`-kind file → exit 1. Each leaves no `FILE-transcript.txt`
+  behind.

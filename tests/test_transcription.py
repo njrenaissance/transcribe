@@ -1,9 +1,11 @@
+import json
+
 import httpx
 import pytest
 
 from transcribe.credentials import AzureCredentials
 from transcribe.errors import TranscriptionError, TranscriptionTimeoutError
-from transcribe.transcription import transcribe_file
+from transcribe.transcription import CANDIDATE_LOCALES, transcribe_file
 
 _CREDENTIALS = AzureCredentials(endpoint="https://example.cognitiveservices.azure.com", key="secret-key")
 
@@ -27,6 +29,21 @@ def test_transcribe_file_returns_parsed_result_on_success(mocker, tmp_path):
     assert kwargs["files"]["audio"][0] == "audio.wav"
     assert kwargs["files"]["audio"][1] == b"fake-audio-bytes"
     assert kwargs["files"]["definition"][2] == "application/json"
+
+
+@pytest.mark.unit
+def test_transcribe_file_sends_every_candidate_locale_for_language_identification(mocker, tmp_path):
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"fake-audio-bytes")
+    response = httpx.Response(
+        200, json={"durationMilliseconds": 0, "phrases": []}, request=httpx.Request("POST", "https://example.com")
+    )
+    mock_post = mocker.patch("transcribe.transcription.httpx.post", return_value=response)
+
+    transcribe_file(audio_path, _CREDENTIALS)
+
+    definition = json.loads(mock_post.call_args.kwargs["files"]["definition"][1])
+    assert definition["locales"] == list(CANDIDATE_LOCALES)
 
 
 @pytest.mark.unit

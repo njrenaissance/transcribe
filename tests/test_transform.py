@@ -48,6 +48,7 @@ _FRONTMATTER_KEY_ORDER = [
     "language",
     "monitor",
     "text_message",
+    "detected_locales",
 ]
 
 
@@ -71,6 +72,7 @@ def test_transform_result_builds_frontmatter_from_call_record(tmp_path):
         "language": "English",
         "monitor": None,
         "text_message": None,
+        "detected_locales": ["en-US"],
     }
 
 
@@ -113,6 +115,36 @@ def test_transform_result_sorts_segments_by_start_when_input_is_unordered(tmp_pa
     output = transform_result(result, source_path, _CALL_RECORD)
 
     assert output.body == "[0.0-2.0] First\n[2.0-5.0] Second"
+
+
+@pytest.mark.unit
+def test_transform_result_detected_locales_lists_distinct_locales_across_phrases(tmp_path):
+    source_path = tmp_path / "audio.mp3"
+    result = {
+        "durationMilliseconds": 5000,
+        "phrases": [
+            {"offsetMilliseconds": 0, "durationMilliseconds": 2000, "text": "Hello", "locale": "en-US"},
+            {"offsetMilliseconds": 2000, "durationMilliseconds": 3000, "text": "Hola", "locale": "es-US"},
+            {"offsetMilliseconds": 5000, "durationMilliseconds": 1000, "text": "again", "locale": "en-US"},
+        ],
+    }
+
+    output = transform_result(result, source_path, _CALL_RECORD)
+
+    assert output.frontmatter["detected_locales"] == ["en-US", "es-US"]
+
+
+@pytest.mark.unit
+def test_transform_result_detected_locales_empty_when_no_phrase_reports_locale(tmp_path):
+    source_path = tmp_path / "audio.mp3"
+    result = {
+        "durationMilliseconds": 2000,
+        "phrases": [{"offsetMilliseconds": 0, "durationMilliseconds": 2000, "text": "Hello"}],
+    }
+
+    output = transform_result(result, source_path, _CALL_RECORD)
+
+    assert output.frontmatter["detected_locales"] == []
 
 
 @pytest.mark.unit
