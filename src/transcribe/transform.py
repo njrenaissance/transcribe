@@ -25,7 +25,7 @@ _CALL_RECORD_FIELDS = (
     "monitor",
     "text_message",
 )
-Frontmatter = dict[str, str | None]
+Frontmatter = dict[str, str | list[str] | None]
 
 
 class Segment(TypedDict):
@@ -70,6 +70,17 @@ def _render_body(segments: list[Segment]) -> str:
     return "\n".join(f"[{segment['start']:.1f}-{segment['end']:.1f}] {segment['text']}" for segment in segments)
 
 
+def _detected_locales(phrases: list[dict[str, Any]]) -> list[str]:
+    """Distinct locales Azure's language identification reported across phrases, sorted.
+
+    Azure's language ID (see `transcription.CANDIDATE_LOCALES`, issue #21) is
+    forced-choice among the candidate locales sent — it never emits an
+    explicit "unidentified" state. A phrase with no `locale` just contributes
+    nothing here rather than failing the whole transcript.
+    """
+    return sorted({locale for phrase in phrases if (locale := phrase.get("locale"))})
+
+
 def transform_result(result: dict[str, Any], source_path: Path, call_record: CallRecord) -> TranscriptOutput:
     """Transform a fast-transcription result and its call record into this project's output schema.
 
@@ -96,7 +107,9 @@ def transform_result(result: dict[str, Any], source_path: Path, call_record: Cal
         ),
         key=lambda segment: segment["start"],
     )
-    return TranscriptOutput(frontmatter=_base_frontmatter(source_path, call_record), body=_render_body(segments))
+    frontmatter = _base_frontmatter(source_path, call_record)
+    frontmatter["detected_locales"] = _detected_locales(phrases)
+    return TranscriptOutput(frontmatter=frontmatter, body=_render_body(segments))
 
 
 def build_error_output(source_path: Path, error: AppError, call_record: CallRecord | None = None) -> ErrorOutput:
