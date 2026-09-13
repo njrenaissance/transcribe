@@ -33,7 +33,18 @@ _CALL_RECORD_FIELDS = (
     "monitor",
     "text_message",
 )
-Frontmatter = dict[str, str | int | list[str] | None]
+Frontmatter = dict[str, str | int | float | bool | list[str] | None]
+
+# Thresholds for `needs_review`, validated against a 16-call sample with real
+# human-transcribed references (issue: quality scoring). Every call that a
+# human transcript confirmed was well-captured had coverage_ratio >= 0.42 and
+# word_density >= 1.81; every silently-near-empty "success" had at least one
+# of these below the cutoffs. Not complete: a transcript with normal coverage
+# and density but wrong/repetitive content (e.g. one phrase mis-recognized as
+# a repeated stock phrase) can still slip through — this catches sparse or
+# gappy output, not plausible-but-incorrect output.
+_MIN_COVERAGE_RATIO = 0.30
+_MIN_WORD_DENSITY = 1.0
 
 
 class Segment(TypedDict):
@@ -103,6 +114,35 @@ def _render_body(segments: list[Segment], timestamp_format: str) -> str:
     return "\n".join(_render_segment(segment, timestamp_format) for segment in segments)
 
 
+def _quality_signals(phrases: list[dict[str, Any]], segments: list[Segment], audio_duration_ms: int) -> Frontmatter:
+    """Cheap, reference-free signals for flagging a transcript as worth a human's second look.
+
+    `coverage_ratio` is the fraction of the audio actually spanned by a
+    phrase (low → Azure recognized speech in only part of the call);
+    `word_density` is words per covered second (low → sparse, likely
+    truncated recognition even where a phrase exists); `average_confidence`
+    is Azure's own mean per-phrase confidence, informational only pending
+    threshold calibration against more real data. `needs_review` is set
+    when either validated threshold is crossed (see `_MIN_COVERAGE_RATIO`/
+    `_MIN_WORD_DENSITY`) — a` False` value is not a quality guarantee, just
+    the absence of this particular warning sign.
+    """
+    audio_duration_s = audio_duration_ms / 1000
+    covered_s = sum(segment["end"] - segment["start"] for segment in segments)
+    word_count = sum(len(segment["text"].split()) for segment in segments)
+    coverage_ratio = covered_s / audio_duration_s if audio_duration_s else 0.0
+    word_density = word_count / covered_s if covered_s else 0.0
+    confidences = [confidence for phrase in phrases if (confidence := phrase.get("confidence")) is not None]
+    average_confidence = sum(confidences) / len(confidences) if confidences else None
+    needs_review = coverage_ratio < _MIN_COVERAGE_RATIO or word_density < _MIN_WORD_DENSITY
+    return {
+        "average_confidence": round(average_confidence, 3) if average_confidence is not None else None,
+        "coverage_ratio": round(coverage_ratio, 3),
+        "word_density": round(word_density, 3),
+        "needs_review": needs_review,
+    }
+
+
 def _detected_locales(phrases: list[dict[str, Any]]) -> list[str]:
     """Distinct locales Azure's language identification reported across phrases, sorted.
 
@@ -148,9 +188,11 @@ def transform_result(
         ),
         key=lambda segment: segment["start"],
     )
+    audio_duration_ms = result["durationMilliseconds"]
     frontmatter = _base_frontmatter(source_path, call_record)
-    frontmatter["audio_duration"] = result["durationMilliseconds"]
+    frontmatter["audio_duration"] = audio_duration_ms
     frontmatter["detected_locales"] = _detected_locales(phrases)
+    frontmatter.update(_quality_signals(phrases, segments, audio_duration_ms))
     return TranscriptOutput(frontmatter=frontmatter, body=_render_body(segments, timestamp_format))
 
 
