@@ -94,6 +94,16 @@ single request. Either way, `--call-db` (or the `CALL_DB_PATH` environment
 variable) points at call-inventory's SQLite index, used to look up each
 file's call record by `ref`+`target` for the output's frontmatter.
 
+By default each transcript is written next to its source file
+(`FILE-transcript.txt`). Pass `--destination DIR` to write every transcript
+into one shared directory instead, named `<ref>-<target>-<stem>-transcript.txt`
+to avoid collisions between same-named audio files from different calls.
+
+Each transcript segment's timestamp defaults to `HH:MM:SS` (elapsed time from
+the start of the call). Pass `--timestamp-format` with any
+[`time.strftime`](https://docs.python.org/3/library/time.html#time.strftime)
+format string (e.g. `%M:%S`) to change it.
+
 A file already holding a successful `FILE-transcript.txt` transcript is
 skipped on a later run (no Azure call) — safe to re-run over a large manifest
 after an interruption. Pass `--clobber` to reprocess every file regardless of

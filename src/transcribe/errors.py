@@ -51,6 +51,19 @@ class EmptyTranscriptionResultError(AppError):
         self.path = path
 
 
+class LanguageNotIdentifiedError(AppError):
+    """Raised when Azure can't confidently identify a locale for the audio (issue #21).
+
+    Confirmed live via Azure's 422 `NoLanguageIdentified` response — typically
+    on very short or low-signal audio where there isn't enough speech for
+    language identification to decide among `transcription.CANDIDATE_LOCALES`.
+    """
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(f"language could not be identified for {path}")
+        self.path = path
+
+
 class OutputWriteError(AppError):
     """Raised when writing the transcript output JSON file fails."""
 

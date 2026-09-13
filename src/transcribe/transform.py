@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
@@ -10,6 +11,13 @@ import yaml
 
 from .call_lookup import CallRecord
 from .errors import AppError, EmptyTranscriptionResultError, OutputWriteError
+
+# A `time.strftime` format string (https://docs.python.org/3/library/time.html#time.strftime),
+# configurable via --timestamp-format. Each segment's start/end is rendered with
+# `time.strftime(timestamp_format, time.gmtime(seconds))` -- `seconds` is elapsed
+# time from the start of the call, not a wall-clock time, so this reads as
+# hours/minutes/seconds *since the call began*.
+DEFAULT_TIMESTAMP_FORMAT = "%H:%M:%S"
 
 _CALL_RECORD_FIELDS = (
     "ref",
@@ -25,7 +33,7 @@ _CALL_RECORD_FIELDS = (
     "monitor",
     "text_message",
 )
-Frontmatter = dict[str, str | list[str] | None]
+Frontmatter = dict[str, str | int | list[str] | None]
 
 
 class Segment(TypedDict):
@@ -34,6 +42,7 @@ class Segment(TypedDict):
     start: float
     end: float
     text: str
+    speaker: int | None
 
 
 @dataclass(frozen=True)
@@ -65,9 +74,33 @@ def _base_frontmatter(source_path: Path, call_record: CallRecord | None) -> Fron
     return frontmatter
 
 
-def _render_body(segments: list[Segment]) -> str:
-    """Render timestamped segments as a human-readable plain-text transcript body."""
-    return "\n".join(f"[{segment['start']:.1f}-{segment['end']:.1f}] {segment['text']}" for segment in segments)
+def validate_timestamp_format(timestamp_format: str) -> None:
+    """Validate that `timestamp_format` is usable with `time.strftime`, failing fast at startup.
+
+    Raises:
+        ValueError: if `timestamp_format` contains a directive `time.strftime` rejects.
+    """
+    time.strftime(timestamp_format, time.gmtime(0))
+
+
+def _format_timestamp(seconds: float, timestamp_format: str) -> str:
+    """Render a segment timestamp using `timestamp_format`, relative to the start of the call."""
+    return time.strftime(timestamp_format, time.gmtime(seconds))
+
+
+def _render_segment(segment: Segment, timestamp_format: str) -> str:
+    """Render one segment as `<start> - <end> Speaker N: text`, or without a speaker label if unknown."""
+    start = _format_timestamp(segment["start"], timestamp_format)
+    end = _format_timestamp(segment["end"], timestamp_format)
+    timing = f"{start} - {end}"
+    if segment["speaker"] is None:
+        return f"{timing} {segment['text']}"
+    return f"{timing} Speaker {segment['speaker']}: {segment['text']}"
+
+
+def _render_body(segments: list[Segment], timestamp_format: str) -> str:
+    """Render timestamped, speaker-labeled segments as a human-readable plain-text transcript body."""
+    return "\n".join(_render_segment(segment, timestamp_format) for segment in segments)
 
 
 def _detected_locales(phrases: list[dict[str, Any]]) -> list[str]:
@@ -81,13 +114,20 @@ def _detected_locales(phrases: list[dict[str, Any]]) -> list[str]:
     return sorted({locale for phrase in phrases if (locale := phrase.get("locale"))})
 
 
-def transform_result(result: dict[str, Any], source_path: Path, call_record: CallRecord) -> TranscriptOutput:
+def transform_result(
+    result: dict[str, Any],
+    source_path: Path,
+    call_record: CallRecord,
+    timestamp_format: str = DEFAULT_TIMESTAMP_FORMAT,
+) -> TranscriptOutput:
     """Transform a fast-transcription result and its call record into this project's output schema.
 
     Args:
         result: the parsed fast-transcription result JSON.
         source_path: the input audio file the result belongs to.
         call_record: the matching call record, used to populate the frontmatter.
+        timestamp_format: a `time.strftime` format string for each segment's
+            start/end, relative to the start of the call.
 
     Raises:
         EmptyTranscriptionResultError: if the result has no phrases (no usable transcript).
@@ -102,14 +142,16 @@ def transform_result(result: dict[str, Any], source_path: Path, call_record: Cal
                 start=phrase["offsetMilliseconds"] / 1000,
                 end=(phrase["offsetMilliseconds"] + phrase["durationMilliseconds"]) / 1000,
                 text=phrase["text"],
+                speaker=phrase.get("speaker"),
             )
             for phrase in phrases
         ),
         key=lambda segment: segment["start"],
     )
     frontmatter = _base_frontmatter(source_path, call_record)
+    frontmatter["audio_duration"] = result["durationMilliseconds"]
     frontmatter["detected_locales"] = _detected_locales(phrases)
-    return TranscriptOutput(frontmatter=frontmatter, body=_render_body(segments))
+    return TranscriptOutput(frontmatter=frontmatter, body=_render_body(segments, timestamp_format))
 
 
 def build_error_output(source_path: Path, error: AppError, call_record: CallRecord | None = None) -> ErrorOutput:
@@ -124,8 +166,17 @@ def build_error_output(source_path: Path, error: AppError, call_record: CallReco
     return ErrorOutput(frontmatter=frontmatter)
 
 
-def output_path(source_path: Path) -> Path:
-    """The sibling `FILE-transcript.txt` path that `source_path`'s output is written to."""
+def output_path(source_path: Path, ref: str, target: str, destination: Path | None = None) -> Path:
+    """The transcript output path for `source_path`.
+
+    Co-located next to `source_path` by default: `FILE-transcript.txt`
+    (`source_path.stem + "-transcript.txt"`). When `destination` is given,
+    every transcript is written there instead, named
+    `<ref>-<target>-<stem>-transcript.txt` so files sharing a stem from
+    different calls don't collide in one shared directory.
+    """
+    if destination is not None:
+        return destination / f"{ref}-{target}-{source_path.stem}-transcript.txt"
     return source_path.with_name(f"{source_path.stem}-transcript.txt")
 
 
@@ -147,18 +198,18 @@ def _read_frontmatter(path: Path) -> Frontmatter:
     return loaded if isinstance(loaded, dict) else {}
 
 
-def has_existing_transcript(source_path: Path) -> bool:
+def has_existing_transcript(source_path: Path, ref: str, target: str, destination: Path | None = None) -> bool:
     """Whether `source_path` already has a successful transcript on disk.
 
     Used to resume a run without re-transcribing files that already
     succeeded. An error-echoing output (or a missing/unreadable/corrupt/malformed
     file) does not count as done, so a prior failure is retried on the next run.
     """
-    destination = output_path(source_path)
-    if not destination.exists():
+    output_file = output_path(source_path, ref, target, destination)
+    if not output_file.exists():
         return False
     try:
-        frontmatter = _read_frontmatter(destination)
+        frontmatter = _read_frontmatter(output_file)
     except (OSError, ValueError, yaml.YAMLError):
         return False
     return "error" not in frontmatter
@@ -179,24 +230,32 @@ def _render_output(output: TranscriptOutput | ErrorOutput) -> str:
     return f"{_FRONTMATTER_DELIMITER}{frontmatter_yaml}{_FRONTMATTER_DELIMITER}{body}"
 
 
-def write_transcript_txt(output: TranscriptOutput | ErrorOutput, source_path: Path) -> Path:
-    """Atomically write `output` to `FILE-transcript.txt`, a sibling of `source_path`.
+def write_transcript_txt(
+    output: TranscriptOutput | ErrorOutput,
+    source_path: Path,
+    ref: str,
+    target: str,
+    destination: Path | None = None,
+) -> Path:
+    """Atomically write `output` to its transcript path (see `output_path`).
 
-    Writes to a temp file in the same directory and renames it into place with
-    `os.replace`, so a mid-write failure never leaves a partial/corrupt destination file.
+    Creates `destination` first if it doesn't exist yet. Writes to a temp
+    file in the same directory and renames it into place with `os.replace`,
+    so a mid-write failure never leaves a partial/corrupt destination file.
 
     Raises:
         OutputWriteError: if the write or the atomic rename fails.
     """
-    destination = output_path(source_path)
+    output_file = output_path(source_path, ref, target, destination)
     text = _render_output(output)
-    fd, tmp_name = tempfile.mkstemp(dir=destination.parent, prefix=f".{destination.name}.", suffix=".tmp")
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=output_file.parent, prefix=f".{output_file.name}.", suffix=".tmp")
     tmp_path = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
             tmp_file.write(text)
-        os.replace(tmp_path, destination)
+        os.replace(tmp_path, output_file)
     except OSError as err:
         tmp_path.unlink(missing_ok=True)
-        raise OutputWriteError(destination, str(err)) from err
-    return destination
+        raise OutputWriteError(output_file, str(err)) from err
+    return output_file

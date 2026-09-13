@@ -134,6 +134,82 @@ def test_parse_args_sets_clobber_when_flag_given():
 
 
 @pytest.mark.unit
+def test_parse_args_defaults_destination_to_none():
+    parsed = parse_args(["--audiopath", "a.mp3", "--ref", "123", "--target", "5551234567", "--call-db", _DUMMY_CALL_DB])
+
+    assert parsed.destination is None
+
+
+@pytest.mark.unit
+def test_parse_args_sets_destination_when_given():
+    parsed = parse_args(
+        [
+            "--audiopath",
+            "a.mp3",
+            "--ref",
+            "123",
+            "--target",
+            "5551234567",
+            "--call-db",
+            _DUMMY_CALL_DB,
+            "--destination",
+            "out",
+        ]
+    )
+
+    assert parsed.destination == Path("out")
+
+
+@pytest.mark.unit
+def test_parse_args_defaults_timestamp_format():
+    parsed = parse_args(["--audiopath", "a.mp3", "--ref", "123", "--target", "5551234567", "--call-db", _DUMMY_CALL_DB])
+
+    assert parsed.timestamp_format == "%H:%M:%S"
+
+
+@pytest.mark.unit
+def test_parse_args_sets_custom_timestamp_format():
+    parsed = parse_args(
+        [
+            "--audiopath",
+            "a.mp3",
+            "--ref",
+            "123",
+            "--target",
+            "5551234567",
+            "--call-db",
+            _DUMMY_CALL_DB,
+            "--timestamp-format",
+            "%M:%S",
+        ]
+    )
+
+    assert parsed.timestamp_format == "%M:%S"
+
+
+@pytest.mark.unit
+def test_parse_args_exits_when_timestamp_format_is_invalid(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        parse_args(
+            [
+                "--audiopath",
+                "a.mp3",
+                "--ref",
+                "123",
+                "--target",
+                "5551234567",
+                "--call-db",
+                _DUMMY_CALL_DB,
+                "--timestamp-format",
+                "%Q",
+            ]
+        )
+
+    assert exc_info.value.code == EXIT_CODE_USAGE_ERROR
+    assert "--timestamp-format" in capsys.readouterr().err
+
+
+@pytest.mark.unit
 def test_read_manifest_returns_entries(tmp_path):
     manifest = tmp_path / "manifest.csv"
     _write_manifest(manifest, [("123", "5551234567", "a.mp3"), ("456", "5559876543", "b.wav")])

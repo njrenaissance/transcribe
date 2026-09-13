@@ -72,7 +72,66 @@ def test_main_writes_output_file_and_returns_zero_for_valid_entry(mocker, tmp_pa
     frontmatter = _read_frontmatter(output_file)
     assert frontmatter["source_file"] == "audio.mp3"
     assert frontmatter["ref"] == "123"
-    assert output_file.read_text(encoding="utf-8").endswith("[0.0-2.5] Hello world")
+    assert output_file.read_text(encoding="utf-8").endswith("00:00:00 - 00:00:02 Hello world")
+
+
+@pytest.mark.unit
+@pytest.mark.usefixtures("valid_credentials_env")
+def test_main_writes_to_destination_directory_with_ref_target_stem_naming(mocker, tmp_path, make_call_db):
+    audio_file = tmp_path / "source" / "audio.mp3"
+    audio_file.parent.mkdir()
+    audio_file.write_bytes(b"fake-audio-bytes")
+    destination_dir = tmp_path / "out"
+    call_db = make_call_db([_CALL_ROW])
+    _mock_response(mocker, _VALID_RESULT)
+
+    exit_code = main(
+        [
+            "--audiopath",
+            str(audio_file),
+            "--ref",
+            "123",
+            "--target",
+            "5551234567",
+            "--call-db",
+            str(call_db),
+            "--destination",
+            str(destination_dir),
+        ]
+    )
+
+    assert exit_code == 0
+    output_file = destination_dir / "123-5551234567-audio-transcript.txt"
+    assert output_file.exists()
+    assert not (audio_file.parent / "audio-transcript.txt").exists()
+
+
+@pytest.mark.unit
+@pytest.mark.usefixtures("valid_credentials_env")
+def test_main_uses_custom_timestamp_format(mocker, tmp_path, make_call_db):
+    audio_file = tmp_path / "audio.mp3"
+    audio_file.write_bytes(b"fake-audio-bytes")
+    call_db = make_call_db([_CALL_ROW])
+    _mock_response(mocker, _VALID_RESULT)
+
+    exit_code = main(
+        [
+            "--audiopath",
+            str(audio_file),
+            "--ref",
+            "123",
+            "--target",
+            "5551234567",
+            "--call-db",
+            str(call_db),
+            "--timestamp-format",
+            "%M:%S",
+        ]
+    )
+
+    assert exit_code == 0
+    output_file = tmp_path / "audio-transcript.txt"
+    assert output_file.read_text(encoding="utf-8").endswith("00:00 - 00:02 Hello world")
 
 
 def _write_manifest(path: Path, rows: list[tuple[str, str, str]]) -> None:
@@ -383,4 +442,4 @@ def test_main_retries_file_with_existing_error_output_without_clobber(mocker, tm
     assert exit_code == 0
     mock_post.assert_called_once()
     output_file = tmp_path / "audio-transcript.txt"
-    assert output_file.read_text(encoding="utf-8").endswith("[0.0-2.5] Hello world")
+    assert output_file.read_text(encoding="utf-8").endswith("00:00:00 - 00:00:02 Hello world")

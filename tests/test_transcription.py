@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from transcribe.credentials import AzureCredentials
-from transcribe.errors import TranscriptionError, TranscriptionTimeoutError
+from transcribe.errors import LanguageNotIdentifiedError, TranscriptionError, TranscriptionTimeoutError
 from transcribe.transcription import CANDIDATE_LOCALES, transcribe_file
 
 _CREDENTIALS = AzureCredentials(endpoint="https://example.cognitiveservices.azure.com", key="secret-key")
@@ -62,6 +62,21 @@ def test_transcribe_file_disables_profanity_filtering(mocker, tmp_path):
 
 
 @pytest.mark.unit
+def test_transcribe_file_requests_diarization_for_up_to_two_speakers(mocker, tmp_path):
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"fake-audio-bytes")
+    response = httpx.Response(
+        200, json={"durationMilliseconds": 0, "phrases": []}, request=httpx.Request("POST", "https://example.com")
+    )
+    mock_post = mocker.patch("transcribe.transcription.httpx.post", return_value=response)
+
+    transcribe_file(audio_path, _CREDENTIALS)
+
+    definition = json.loads(mock_post.call_args.kwargs["files"]["definition"][1])
+    assert definition["diarization"] == {"maxSpeakers": 2, "enabled": True}
+
+
+@pytest.mark.unit
 def test_transcribe_file_raises_transcription_error_on_non_2xx_response(mocker, tmp_path):
     audio_path = tmp_path / "audio.wav"
     audio_path.write_bytes(b"fake-audio-bytes")
@@ -74,6 +89,36 @@ def test_transcribe_file_raises_transcription_error_on_non_2xx_response(mocker, 
 
     assert isinstance(exc_info.value.__cause__, httpx.HTTPStatusError)
     assert "401" in str(exc_info.value)
+
+
+@pytest.mark.unit
+def test_transcribe_file_raises_language_not_identified_on_no_language_identified_response(mocker, tmp_path):
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"fake-audio-bytes")
+    request = httpx.Request("POST", "https://example.com")
+    body = {
+        "code": "UnprocessableEntity",
+        "message": "No language was identified.",
+        "innerError": {"code": "NoLanguageIdentified", "message": "No language was identified."},
+    }
+    response = httpx.Response(422, json=body, request=request)
+    mocker.patch("transcribe.transcription.httpx.post", return_value=response)
+
+    with pytest.raises(LanguageNotIdentifiedError, match="audio.wav"):
+        transcribe_file(audio_path, _CREDENTIALS)
+
+
+@pytest.mark.unit
+def test_transcribe_file_raises_transcription_error_on_other_422_response(mocker, tmp_path):
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"fake-audio-bytes")
+    request = httpx.Request("POST", "https://example.com")
+    body = {"code": "UnprocessableEntity", "message": "Something else entirely."}
+    response = httpx.Response(422, json=body, request=request)
+    mocker.patch("transcribe.transcription.httpx.post", return_value=response)
+
+    with pytest.raises(TranscriptionError):
+        transcribe_file(audio_path, _CREDENTIALS)
 
 
 @pytest.mark.unit
